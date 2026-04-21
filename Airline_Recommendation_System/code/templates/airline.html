@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <link href='https://fonts.googleapis.com/css?family=Montserrat' rel='stylesheet'>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/airline.css') }}">
+</head>
+<body>
+
+<div id="side_bar">
+  <dl>
+    <!-- This portion displays ratings of the airline, uses output from feature_ratings.py -->
+    <dt>Feature ratings of {{airline}}</dt>
+    {% for rating in ratings %}
+    <!-- show rating.values: <span class="text">{{rating.value}}</span> -->
+      <dd class="percentage percentage-{{rating.percent}}">
+          <span class="text">{{rating.name}}</span><span class="rate rate-{{rating.percent}}">{{rating.value}}</span>
+      </dd>
+    {% endfor %}
+  </dl>
+</div>
+
+  <div id="review_content">
+		<!-- This portion uses output from airline_homepage.py -->
+		<h2>Click <a href="{{al_homepage}}" target="_blank">here</a> to book your next dream flight!</h2>
+		
+      <!-- This portion displays reviews of the airline, uses output from airline_revews.py -->
+      <p>User reviews of {{airline}}</p>
+      <dl>
+        {% for n, review in reviews.items() %}
+          <dt>Review {{(n+1)|string}}</dt>
+          <dd class="reviews">{{ review }}</dd>
+        {% endfor %}
+      </dl>
+  </div>
+</body>
+</html>

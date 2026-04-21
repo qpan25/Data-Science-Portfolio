@@ -1,0 +1,6 @@
+{"type":"Topology","objects":{"cities":{"type":"GeometryCollection","geometries":[
+{"type":"Point","id":"AA","coordinates":[-70,40]},
+{"type":"Point","id":"BB","coordinates":[70,60]},
+{"type":"Point","id":"CC","coordinates":[50,30]},
+{"type":"Point","id":"DD","coordinates":[-80,60]},
+{"type":"Point","id":"EE","coordinates":[-70,40]}]}}}

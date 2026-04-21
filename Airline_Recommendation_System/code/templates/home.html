@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+<link href='https://fonts.googleapis.com/css?family=Montserrat' rel='stylesheet'>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/home.css') }}">
+<script src="{{ url_for('static', filename='libs/d3.v5.min.js') }}"></script>
+<script src="{{ url_for('static', filename='libs/topojson.v2.min.js') }}"></script>
+<script src="{{ url_for('static', filename='libs/worldmap.js') }}"></script>
+<script src="{{ url_for('static', filename='libs/iucars.js') }}"></script>
+<script src="{{ url_for('static', filename='libs/recomm.js') }}"></script>
+<script src="{{ url_for('static', filename='libs/review.js') }}"></script>
+
+  <title>IUCARS - An Interactive User-Centric Airline Recommendation System</title>
+
+<style>
+</style>
+
+</head>
+<body>
+
+<div id="main_container">
+
+<div id="navigation">
+  <div class="menu">
+    <input class="menu_input" id="btn2" name="menu" type="radio" checked/>
+    <label class="menu_label" onclick="switch2menu('home');" for="btn2" style="cursor:pointer;" title="Run the recommendation model">
+      <div class="fa fa-user"><img class="menu_img" src="{{ url_for('static', filename='png/home.png') }}"></div>
+      <div class="menu_text">
+         Recommendation
+      </div>
+    </label>
+    <input class="menu_input" id="btn3" name="menu" type="radio" />
+    <label class="menu_label" onclick="switch2menu('review');" for="btn3" style="cursor:pointer;" title="Submit a review">
+      <div class="fa fa-cog"><img class="menu_img" src="{{ url_for('static', filename='png/review.png') }}"> </div>
+      <div class="menu_text">
+        Review
+      </div>
+    </label>
+    <!--
+    <input class="menu_input" id="btn4" name="menu" type="radio" />
+    <label class="menu_label" onclick="switch2menu('review');" for="btn4"  title="Sign up as a user. Need to be implemented as a real website!">
+      <div class="fa fa-cog"><img class="menu_img" src="{{ url_for('static', filename='png/user.png') }}"> </div>
+      <div class="menu_text">
+        User
+      </div>
+    </label>
+    -->
+  </div>
+
+<div id="recomm_param" class="container">
+  <!--h1 style="margin-bottom: 20px;">Airline Recommendation System</h1-->
+  <div class="menu_space">
+  </div>
+  <div class="section">
+    <label for="departureCity">Departure City:</label>
+    <select class="departureCity" id="departureCity" onchange="departureCity_selected(this)">
+      <option value="" disabled selected>Select Departure City</option>
+    {% for dptCity in departureCities %}
+      <option value="{{dptCity}}">{{dptCity}}</option>
+    {% endfor %}
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="arrivalCity">Arrival City:</label>
+    <select class="arrivalCity" id="arrivalCity" onchange="arrivalCity_selected(this)">
+      <option value="" disabled selected>Select Arrival City</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="stopCity">Stop City:</label>
+    <select class="stopCity" id="stopCity" onchange="stopCity_selected(this)">
+      <option value="" selected>None Stops</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="preferredAircraft">Preferred Aircraft:</label>
+    <select id="preferredAircraft" class="preferredAircraft">
+      <option value="" disabled selected>Preferred Aircraft</option>
+      <option value="Boeing">Boeing</option>
+      <option value="Airbus">Airbus</option>
+      <option value="Don't care">Don't care</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="cabinService">Cabin Service: </label>
+    <select id="cabinService" class="cabinService">
+      <option value="" disabled selected>Select Cabin Service</option>
+      <option value="Very important">Very important</option>
+      <option value="Important">Important</option>
+      <option value="Somewhat important">Somewhat important</option>
+      <option value="Somewhat not important">Somewhat not important</option>
+      <option value="Not important">Not important</option>
+      <option value="Don't care">Don't care</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="food">Food: </label>
+    <select id="food" class="food">
+      <option value="" disabled selected>Select Food Option</option>
+      <option value="Very important">Very important</option>
+      <option value="Important">Important</option>
+      <option value="Somewhat important">Somewhat important</option>
+      <option value="Somewhat not important">Somewhat not important</option>
+      <option value="Not important">Not important</option>
+      <option value="Don't care">Don't care</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="seatComfort">Seat Comfort: </label>
+    <select id="seatComfort" class="seatComfort">
+      <option value="" disabled selected>Select Seat Comfort Option</option>
+      <option value="Very important">Very important</option>
+      <option value="Important">Important</option>
+      <option value="Somewhat important">Somewhat important</option>
+      <option value="Somewhat not important">Somewhat not important</option>
+      <option value="Not important">Not important</option>
+      <option value="Don't care">Don't care</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="entertainment">Entertainment: </label>
+    <select id="entertainment" class="entertainment">
+      <option value="" disabled selected>Select Entertainment Option</option>
+      <option value="Very important">Very important</option>
+      <option value="Important">Important</option>
+      <option value="Somewhat important">Somewhat important</option>
+      <option value="Somewhat not important">Somewhat not important</option>
+      <option value="Not important">Not important</option>
+      <option value="Don't care">Don't care</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="groundService">Ground Service: </label>
+    <select id="groundService" class="groundService">
+      <option value="" disabled selected>Select Ground Service Option</option>
+      <option value="Very important">Very important</option>
+      <option value="Important">Important</option>
+      <option value="Somewhat important">Somewhat important</option>
+      <option value="Somewhat not important">Somewhat not important</option>
+      <option value="Not important">Not important</option>
+      <option value="Don't care">Don't care</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <label for="wifi">Wi-Fi: </label>
+    <select id="wifi" class="wifi">
+      <option value="" disabled selected>Select Wi-Fi Option</option>
+      <option value="Very important">Very important</option>
+      <option value="Important">Important</option>
+      <option value="Somewhat important">Somewhat important</option>
+      <option value="Somewhat not important">Somewhat not important</option>
+      <option value="Not important">Not important</option>
+      <option value="Don't care">Don't care</option>
+    </select>
+  </div>
+
+  <br>
+
+  <button class="recomm_button" onclick="submitSelections()">Submit</button>
+</div>
+
+<div id="recomm_result" class="container">
+  <div class="menu_space">
+  </div>
+  <div id="wait_recomm">
+    <h4>Please hold on as our model is working diligently to fetch your personalized recommendations!</h4>
+    <img id="loading_gif" src="{{ url_for('static', filename='png/loading.gif') }}" >
+  </div>
+  <div id="show_recomm">
+    <h4>Ta-da, recommendations and matching rate:</h4>
+    <div id="topAirlines"></div>
+    <div id="gaugeCharts"></div>
+
+  <button class="recomm_button" onclick="DoItAgain()">Do it again</button>
+  </div>
+</div>
+
+<div id="review_input" class="container">
+  <div class="menu_space">
+  </div>
+    <div class="section" id="selectionMenu">
+      <h4 style="margin-top: 5px; margin-bottom: 5px;">We'd like to hear your voice! </h4>
+
+      <label for="rv_airline">Select the Airline Name:</label>
+      <select id="rv_airline" class="departureCity">
+        <option value="" disabled selected>Select Airline</option>
+        <option value="placeholder">Placeholder</option>
+      </select>
+
+      <label for="departureCity">Select Your Departure City:</label>
+      <select id="rv_departureCity" class="departureCity">
+        <option value="" disabled selected>Select Departure City</option>
+        <option value="placeholder">Placeholder</option>
+      </select>
+
+      <label for="arrivalCity">Select Your Arrival City:</label>
+      <select id="rv_arrivalCity" class="arrivalCity">
+        <option value="" disabled selected>Select Arrival City</option>
+        <option value="placeholder">Placeholder</option>
+      </select>
+
+{#      <label for="stopCity">Select Your Stop City:</label>#}
+{#      <select class="stopCity">#}
+{#        <option value="" disabled selected>Select Stop City</option>#}
+{#        <option value="placeholder">Placeholder</option>#}
+{#      </select>#}
+{##}
+{#      <label for="rv_aircraft">Aircraft:</label>#}
+{#      <select id="rv_aircraft" class="aircraft">#}
+{#        <option value="" disabled selected>Select Aircraft</option>#}
+{#        <option value="Boeing">Boeing</option>#}
+{#        <option value="Airbus">Airbus</option>#}
+{#      </select>#}
+
+      <label for="cabinService">Cabin Service: </label>
+      <select class="cabinService">
+        <option value="" disabled selected>Rate Your Cabin Service</option>
+        <option value="5">5 being the best</option>
+        <option value="4">4</option>
+        <option value="3">3</option>
+        <option value="2">2</option>
+        <option value="1">1</option>
+        <option value="0">0 being the worst</option>
+      </select>
+
+      <label for="food">Food: </label>
+      <select class="food">
+        <option value="" disabled selected>Rate Your Food Option</option>
+        <option value="5">5 being the best</option>
+        <option value="4">4</option>
+        <option value="3">3</option>
+        <option value="2">2</option>
+        <option value="1">1</option>
+        <option value="0">0 being the worst</option>
+      </select>
+
+      <label for="seatComfort">Seat Comfort: </label>
+      <select class="seatComfort">
+        <option value="" disabled selected>Rate Your Seat Comfort</option>
+        <option value="5">5 being the best</option>
+        <option value="4">4</option>
+        <option value="3">3</option>
+        <option value="2">2</option>
+        <option value="1">1</option>
+        <option value="0">0 being the worst</option>
+      </select>
+
+      <label for="entertainment">Entertainment: </label>
+      <select class="entertainment">
+        <option value="" disabled selected>Rate Your Entertainment Experience</option>
+        <option value="5">5 being the best</option>
+        <option value="4">4</option>
+        <option value="3">3</option>
+        <option value="2">2</option>
+        <option value="1">1</option>
+        <option value="0">0 being the worst</option>
+      </select>
+
+      <label for="groundService">Ground Service: </label>
+      <select class="groundService">
+        <option value="" disabled selected>Rate the Ground Service</option>
+        <option value="5">5 being the best</option>
+        <option value="4">4</option>
+        <option value="3">3</option>
+        <option value="2">2</option>
+        <option value="1">1</option>
+        <option value="0">0 being the worst</option>
+      </select>
+
+      <label for="wifi">Wi-Fi: </label>
+      <select class="wifi">
+        <option value="" disabled selected>Rate the Wi-Fi Speed</option>
+        <option value="5">5 being the best</option>
+        <option value="4">4</option>
+        <option value="3">3</option>
+        <option value="2">2</option>
+        <option value="1">1</option>
+        <option value="0">0 being the worst</option>
+      </select>
+
+      <label for="reviewTextArea">Enter your review here:</label>
+      <textarea id="reviewTextArea" placeholder="your review..."></textarea>
+      <button onclick="submitReview()" class="recomm_button" id="submitButton">Submit</button>
+    </div>
+
+</div>
+</div>
+
+<div id="map_wrapper">
+  <div id="map_content">
+    <div id="app_title" class="floating">
+      <h2>User-Centric Airline Recommendation System</h2>
+    </div>
+    <div id="airplane" class="floating">
+        <!-- style="transform: scaleX(-1);" -->
+        <img src="{{ url_for('static', filename='png/airplane.gif') }}"
+             width="200" height="128" style="cursor:pointer;" title="Click me to start"
+        onclick="show_me_the_work();">
+        <div id="click_me" style="cursor:pointer;" title="Click me to start"
+             onclick="show_me_the_work();">Click Me!</div>
+    </div>
+  </div>
+
+</div>
+
+<div id="output">
+    <!--  <object type="text/html" data="/airline" width=100% height=100%>    </object> -->
+</div>
+
+</div>
+
+<!-- The Modal -->
+<div id="myModal" class="modal">
+  <!-- Modal content -->
+  <div class="modal-content">
+    <span class="close">&times;</span>
+    <p> Are you looking to explore the world but not sure where to start?</p>
+    <p> Look no further! Our user-centric airline recommendation system will provide the airlines best suit your travel needs based on your preferences. </p>
+    <p> Input your air travel needs, we will take care the rest with our state-of-the-art algorithm for the most accurate recommendation. </p>
+    <p><br></p>
+    <p> Just finished the trip of your dreams? Had a horrific flight that made you want to swear off that airline? </p>
+    <p> Want your voices to be heard and share your experiences? We are here for you as well. </p>
+    <p> Enter your reviews to share with the world! </p>
+  </div>
+</div>
+</div>
+
+<script>
+
+switch2menu('home')
+
+var width = 1000,
+height = 665;
+
+var initX;
+var mouseClicked = false;
+var s = 1;
+var map_rotated = 90;
+
+var sensitivity_fly = 800;
+var sensitivity_fast = 2000;
+var sensitivity_slow = 80;
+var rotate_center = null;
+
+//need to store this because on zoom end, using mousewheel, mouse position is NAN
+var mouse;
+
+/*
+var projection = d3.geoMercator()
+.scale(153)
+.translate([width/2,height/1.5])
+.rotate([rotated,0,0]); //center on USA
+*/
+
+var projection = d3.geoNaturalEarth1()
+.translate([width/2,height/2+10])
+.rotate([map_rotated,0,0]); //center on USA
+
+var path = d3.geoPath().projection(projection).pointRadius(2);
+
+var zoom = d3.zoom()
+.scaleExtent([1, 10])
+.on("zoom", zoomed)
+.on("end", zoomended);
+
+var svg = d3.select("#map_content")
+.append("svg")
+.attr("width", width)
+.attr("height", height)
+.on("wheel", function() {
+  //zoomend needs mouse coords
+  initX = d3.mouse(this)[0];
+})
+.on("mousedown", function() {
+  //only if scale === 1
+  if(s !== 1) return;
+  initX = d3.mouse(this)[0];
+  mouseClicked = true;
+})
+.call(zoom);
+
+var map = svg.append("g");
+
+var cities = svg.append("g")
+     .attr('class', 'cities')
+
+var routes = svg.append('g')
+     .attr('class', 'routes')
+
+load_basemap([
+    // enter code to read files
+	d3.json("{{ url_for('static', filename='json/full_cities.json') }}"),
+	d3.json("{{ url_for('static', filename='json/world-110m.json') }}")
+    ]
+);
+
+var city_file = "{{ url_for('static', filename='json/cities.json') }}"
+function departureCity_selected(selectObject) {
+  var start_city = selectObject.value;
+  reset_route_points(null, null, null);
+  update_city_lists(start_city, null);
+  rotate_to_city( city_file, 'starting_point', start_city);
+}
+
+function arrivalCity_selected(selectObject) {
+  var end_city = selectObject.value;
+  var start_city = document.getElementById("departureCity").value
+  update_city_lists(start_city, end_city);
+  rotate_to_city( city_file, 'ending_point', end_city);
+}
+
+function stopCity_selected(selectObject) {
+  var city = selectObject.value;
+  rotate_to_city( city_file, 'stop_point', city);
+}
+
+init_model_dialog()
+
+load_review_city_options("{{ url_for('static', filename='json/cities.json') }}");
+
+</script>
+</body>
