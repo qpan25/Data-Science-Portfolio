@@ -1,0 +1,1105 @@
+---
+title: "Pipeline2 - Predictive models comparison"
+author: "Team Connected Insights - Xufei Lang"
+date: "2026-03-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Load packages. 
+```{r, message=FALSE}
+library(dplyr)
+library(caret)
+library(glmnet)
+library(mgcv)
+library(ppsr)
+library(randomForest)
+library(lightgbm)
+library(e1071)
+library(stats)
+library(ggplot2)
+library(fastshap)
+library(forcats)
+library(stringr)
+library(gam)
+```
+
+
+## Load in data df_cluster.csv.  
+You can generate this df_cluster.csv file from Pipeline1.   
+Do not change dataframe name (df), otherwise, it will cause a chain reaction and the whole Rmd file will fail to run.  
+```{r}
+# Load in data
+df<-read.csv("./df_cluster.csv",header=TRUE)
+# Remove irrelevant columns;  remove X if exists. 
+df <- df %>% dplyr::select(-dplyr::any_of(c("X")))  # remove X
+str(df)  #1110*21, 1st is target
+```
+
+
+## Manually input.   
+Please change the target name:    
+- 1st target: "growth_rate"   
+- 2nd target: "growth_rate_CSC"   
+- 3rd target："engagement_adoption_rate"   
+```{r}
+# Type in your target column name.
+target <- "growth_rate"
+```
+
+
+## Data Preparation.   
+Make necessary changes here, but don't change dataframe name (df).
+```{r}
+# Convert Character columns to factor. (Keep binary as integer)
+df <- df %>% 
+  mutate(across(where(is.character), as.factor))
+
+str(df)
+```
+
+
+The following code should work automatically without further modification if you set the above data correctly and only have two clusters, since all of our team's targets are two clusters (tested and run smoothly).    
+If you have more than two clusters, please follow the comments and modify the code accordingly. Please check carefully, and make any necessary changes (some changes need to be made in parameters).   
+
+Please be patient, this whole Rmd file will take a while to run.   
+
+
+# Get segment level dataset.
+```{r}
+df_c1 <- df %>% 
+  filter(Cluster==1) %>% 
+  dplyr::select(-c(Cluster)) %>%
+  mutate(across(where(is.factor), droplevels))  # Drop empty levels
+df_c2 <- df %>% 
+  filter(Cluster==2) %>% 
+  dplyr::select(-c(Cluster)) %>%
+  mutate(across(where(is.factor), droplevels))  # Drop empty levels
+dim(df_c1)
+dim(df_c2)
+head(df)
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# If you only have 3 clusters, you can also just leave it at X for convenience; but if you have more than 3, you do need to copy&paste, and replace X with your cluster number.
+# df_cX <- df %>% filter(Cluster==X) %>% dplyr::select(-c(Cluster))
+# dim(df_cX)
+```
+
+
+## Feature importance ranking function (Try not to change this part)
+```{r}
+rank_features <- function(df, response) {
+
+  # Prepare formula and target
+  formula <- as.formula(paste(response, "~."))
+  y <- df[[response]]
+  
+  # Predictive Power Score:
+  # Captures non-linear and asymmetric predictive relationships.
+  pps_df <- ppsr::score_predictors(df, y=response)
+  pps_imp_df <- data.frame(Feature=pps_df$x, PPS=pps_df$pps)
+  
+  # Random Forest:
+  # Captures non-linear relationships and interactions.
+  set.seed(1234)
+  rf <- randomForest(formula, df, importance=TRUE)
+  rf_imp <- importance(rf, type=1)
+  rf_imp_df <- data.frame(Feature=rownames(rf_imp), RF=rf_imp[,1])
+
+  # LightGBM:
+  # Captures non-linear patterns, interactions and boosted relationships. 
+  set.seed(1234)
+  x <- model.matrix(formula,df)[,-1]
+  lgb <- lightgbm(data=x, label=y, nrounds=200, verbose=-1)
+  lgb_imp <- lgb.importance(lgb)
+  lgb_imp_df <- data.frame(Feature=lgb_imp$Feature, LGB=lgb_imp$Gain)
+  
+  # Elastic Net:
+  # Captures linear relationships and collinearity structure. 
+  set.seed(1234)
+  enet <- cv.glmnet(x,y,alpha=0.5,standardize=TRUE)
+  coef_enet <- coef(enet, s="lambda.min")
+  enet_imp_df <- data.frame(Feature=rownames(coef_enet), ENet=as.numeric(abs(coef_enet[,1])))
+  enet_imp_df <- enet_imp_df[enet_imp_df$Feature != "(Intercept)",, drop=FALSE]
+  if (nrow(enet_imp_df)==0) {
+    enet_imp_df <- data.frame(Feature=colnames(x), ENet=0)
+  }
+  
+  
+  # Merge all importance measures.
+  importance <- merge(pps_imp_df, rf_imp_df, by="Feature", all=TRUE)
+  importance <- merge(importance, lgb_imp_df, by="Feature", all=TRUE)
+  importance <- merge(importance, enet_imp_df, by="Feature", all=TRUE)
+  # Replace NAs with 0.
+  importance[is.na(importance)] <- 0
+  
+  # Consensus Ranking: convert each method to rank then average.
+  importance$Total <- rowMeans(cbind(rank(-importance$PPS, ties.method="average"),
+                                     rank(-importance$RF, ties.method="average"),
+                                     rank(-importance$LGB, ties.method="average"),
+                                     rank(-importance$ENet, ties.method="average")))
+  # Sort by Consensus Ranking (smallest rank = top feature).
+  importance <- importance[order(importance$Total),]
+  # Remove response if accidentally included (safety check)
+  importance <- importance[importance$Feature != response, ]
+  
+  # If feature is dummy, change back to original feature. 
+  importance <- importance %>%
+    # Modify if your dataset has more factor columns than these two.
+    mutate(across(everything(), ~ ifelse(str_starts(., fixed("REGION")), "REGION", .))) %>%
+    mutate(across(everything(), ~ ifelse(str_starts(., fixed("SERVICE_TIER")), "SERVICE_TIER", .))) %>%
+    mutate(across(everything(), ~ ifelse(str_starts(., fixed("BUSINESS_TYPE_PRIMARY")), "BUSINESS_TYPE_PRIMARY", .)))
+
+  return(importance)
+}
+```
+
+
+## Top features for full dataset df and clusters df_c1 & df_c2.   
+```{r, warning=FALSE}
+# Rank features for full dataset.
+importance_df <- rank_features(df, response=target)
+top12 <- importance_df[which(!duplicated(importance_df$Feature))[1:12], 
+                       c("Feature", "Total")]
+# Rank features for cluster 1.
+importance_df_c1 <- rank_features(df_c1, response=target)
+top12_c1 <- importance_df_c1[which(!duplicated(importance_df_c1$Feature))[1:12], 
+                             c("Feature", "Total")]
+# Rank features for cluster 2.
+importance_df_c2 <- rank_features(df_c2, response=target)
+top12_c2 <- importance_df_c2[which(!duplicated(importance_df_c2$Feature))[1:12], 
+                             c("Feature", "Total")]
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# Rank features for cluster X.
+# importance_df_cX <- rank_features(df_cX, response=target)
+# top12_cX <- importance_df_cX[which(!duplicated(importance_df_cX$Feature))[1:12],
+#                              c("Feature", "Total")]
+
+# Compare in the same table. 
+top12_feature <- data.frame(cbind(top12$Feature, 
+                                  top12_c1$Feature, 
+                                  top12_c2$Feature
+                                  # , top12_cX$Feature  # Replace X
+                                  ))
+colnames(top12_feature) <- c("Top12_Full", 
+                             "Top12_Cluster1", 
+                             "Top12_Cluster2"
+                             # , "Top12_ClusterX"  # Replace X
+                             )
+top12_feature
+```
+
+
+## Prepare dataset with Top12 features for prediction. 
+```{r, warning=FALSE}
+df_top12 <- df %>% dplyr::select(target, all_of(top12_feature$Top12_Full))
+df_c1_top12 <- df_c1 %>% dplyr::select(target, all_of(top12_feature$Top12_Cluster1))
+df_c2_top12 <- df_c2 %>% dplyr::select(target, all_of(top12_feature$Top12_Cluster2))
+head(df_top12)
+head(df_c1_top12)
+head(df_c2_top12)
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# df_cX_top12 <- df_cX %>% dplyr::select(target, top12_feature$Top12_ClusterX)
+# head(df_cX_top12)
+```
+
+
+## Linear Regression  
+Need Standardization, no parameter tuning.
+```{r}
+# Function to standardize numeric columns (Do not change this part!)
+standardize_numeric <- function(df, response=NULL, exclude_cols=NULL) {
+  df_scaled <- df
+  numeric_cols <- sapply(df, is.numeric)  # Identify numeric columns
+  if (!is.null(response)) {
+    numeric_cols[response] <- FALSE  # Exclude response variable
+  }
+  if (!is.null(exclude_cols)) {  
+    numeric_cols[exclude_cols] <- FALSE  # Exclude user-specified columns
+  }
+  df_scaled[, numeric_cols] <- scale(df[,numeric_cols])
+  
+  return(df_scaled)
+}
+```
+
+
+```{r}
+# Standardize df_top12, df_c1_top12 and df_c2_top12.
+df_top12_scaled <- standardize_numeric(df_top12, response=target,
+exclude_cols="COMPETITOR_AS_PRIMARY_VENDOR")
+df_c1_top12_scaled <- standardize_numeric(df_c1_top12, response=target,
+exclude_cols="COMPETITOR_AS_PRIMARY_VENDOR")
+df_c2_top12_scaled <- standardize_numeric(df_c2_top12, response=target,
+exclude_cols="COMPETITOR_AS_PRIMARY_VENDOR")  # exclude binary column
+
+head(df_top12_scaled)
+head(df_c1_top12_scaled)
+head(df_c2_top12_scaled)
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# df_cX_top12_scaled <- standardize_numeric(df_cX_top12, response=target,
+# exclude_cols="COMPETITOR_AS_PRIMARY_VENDOR") 
+# head(df_cX_top12_scaled)
+```
+
+
+```{r}
+# Set fixed trainControl for all models.
+set.seed(1234)
+# T-test and Wilcox-test need at least 10-fold CV.
+ctrl <- trainControl(method="cv", number=10, savePredictions="final")  
+```
+
+
+```{r, warning=FALSE}
+# Cross-Validation for Linear Regression. 
+set.seed(1234)  # Need to set seed before each train, do not remove!
+lm_model_top12 <- train(as.formula(paste(target, "~.")),
+                        data=df_top12_scaled, method="lm", 
+                        trControl=ctrl, metric="RMSE")
+set.seed(1234)
+lm_model_c1_top12 <- train(as.formula(paste(target, "~.")),
+                           data=df_c1_top12_scaled, method="lm", 
+                           trControl=ctrl, metric="RMSE")
+set.seed(1234)
+lm_model_c2_top12 <- train(as.formula(paste(target, "~.")),
+                           data=df_c2_top12_scaled, method="lm",
+                           trControl=ctrl, metric="RMSE")
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# set.seed(1234)
+# lm_model_cX_top12 <- train(as.formula(paste(target, "~.")),
+#                            data=df_cX_top12_scaled, method="lm",
+#                            trControl=ctrl, metric="RMSE")
+
+
+results_lm <- rbind(lm_model_top12$results, 
+                    lm_model_c1_top12$results, 
+                    lm_model_c2_top12$results
+                    # , lm_model_cX_top12$results  # Replace X
+                    ) %>%
+  dplyr::select(RMSE, Rsquared)
+rownames(results_lm) <- c("lm_df_top12", 
+                          "lm_df_c1_top12", 
+                          "lm_df_c2_top12"
+                          # , "lm_df_cX_top12"  # Replace X
+                          )
+results_lm
+```
+
+
+## Generalized Additive Models (GAM) with or without splines.   
+Local Smoothing (LOESS, Kernel smoothing) works best with 1-3 numeric predictors, so try GAM instead.   
+Need standardization, used AI suggested parameters for our data size. 
+```{r}
+# Cross-Validation for Linear GAM.
+set.seed(1234)
+gam_linear_top12 <- train(as.formula(paste(target, "~.")),
+                          data=df_top12_scaled, 
+                          method="gam", trControl=ctrl, metric="RMSE")
+set.seed(1234)
+gam_linear_c1_top12 <- train(as.formula(paste(target, "~.")),
+                             data=df_c1_top12_scaled,
+                             method="gam", trControl=ctrl, metric="RMSE")
+set.seed(1234)
+gam_linear_c2_top12 <- train(as.formula(paste(target, "~.")),
+                             data=df_c2_top12_scaled,
+                             method="gam", trControl=ctrl, metric="RMSE")
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# set.seed(1234)
+# gam_linear_cX_top12 <- train(as.formula(paste(target, "~.")),
+#                              data=df_cX_top12_scaled,
+#                              method="gam", trControl=ctrl, metric="RMSE")
+
+
+results_gam_linear <- rbind(gam_linear_top12$results %>% filter(select==TRUE), 
+                            gam_linear_c1_top12$results %>% filter(select==TRUE), 
+                            gam_linear_c2_top12$results %>% filter(select==TRUE)
+                            # , gam_linear_cX_top12$results %>% filter(select==TRUE)  # Replace X
+                            ) %>%
+  dplyr::select(RMSE, Rsquared)
+rownames(results_gam_linear) <- c("gam_linear_df_top12",
+                                  "gam_linear_df_c1_top12",
+                                  "gam_linear_df_c2_top12"
+                                  # , "gam_linear_df_cX_top12"  # Replace X
+                                  )
+results_gam_linear
+```
+
+
+```{r}
+# Cross-Validation for GAM with spline.
+set.seed(1234)
+gam_spline_top12 <- train(as.formula(paste(target, "~.")),
+                          data=df_top12_scaled, method="gamSpline",
+                          tuneGrid=expand.grid(df=c(2,3,4)),  # Edited: to avoid df=1 error
+                          trControl=ctrl, metric="RMSE")
+set.seed(1234)
+gam_spline_c1_top12 <- train(as.formula(paste(target, "~.")),
+                             data=df_c1_top12_scaled, method="gamSpline",
+                             tuneGrid=expand.grid(df=c(2,3,4)),  # Edited: to avoid df=1 error
+                             trControl=ctrl, metric="RMSE")
+set.seed(1234)
+gam_spline_c2_top12 <- train(as.formula(paste(target, "~.")),
+                             data=df_c2_top12_scaled, method="gamSpline",
+                             tuneGrid=expand.grid(df=c(2,3,4)),  # Edited: to avoid df=1 error
+                             trControl=ctrl, metric="RMSE")
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# set.seed(1234)
+# gam_spline_cX_top12 <- train(as.formula(paste(target, "~.")),
+#                              data=df_cX_top12_scaled, method="gamSpline",
+#                              tuneGrid=expand.grid(df=c(2,3,4)),  # Edited: to avoid df=1 error
+#                              trControl=ctrl, metric="RMSE")
+
+results_gam_spline <- rbind(gam_spline_top12$results[which.min(gam_spline_top12$results$RMSE),], 
+                            gam_spline_c1_top12$results[which.min(gam_spline_c1_top12$results$RMSE),], 
+                            gam_spline_c2_top12$results[which.min(gam_spline_c2_top12$results$RMSE),]
+# , gam_spline_cX_top12$results[which.min(gam_spline_cX_top12$results$RMSE),]  
+# Replace X                           
+                            ) %>%
+  dplyr::select(RMSE, Rsquared)
+rownames(results_gam_spline) <- c("gam_spline_df_top12",
+                                  "gam_spline_df_c1_top12",
+                                  "gam_spline_df_c2_top12"
+                                  # , "gam_spline_df_cX_top12"  # Replace X
+                                  )
+results_gam_spline
+```
+
+
+## Random Forest.  
+No standardization needed, need parameter-tuning.
+```{r}
+# Function to find best parameters for RF (Try not to change this part)
+find_rf_best_params <- function(df, response, 
+                                mtry_values=c(2,4,6),
+                                ntree_values=c(200,500,800), 
+                                k_fold=5) {
+  
+  # Number of predictors (exclude response)
+  p <- ncol(df)-1
+  # keep valid mtry values within [1,p]; fallback to 1:p if all filtered
+  mtry_values <- unique(as.integer(mtry_values))
+  mtry_values <- mtry_values[mtry_values>=1 & mtry_values<=p]
+  if (length(mtry_values)==0) mtry_values<-1:p
+ 
+  ctrl <- trainControl(method="cv", number=k_fold)
+  tuning_results <- data.frame()
+  
+  for (nt in ntree_values) {
+    rf_grid <- expand.grid(mtry=mtry_values)
+    
+    set.seed(1234)
+    rf_model <- train(as.formula(paste(response, "~.")), 
+                      data=df, method="rf", metric="RMSE", 
+                      trControl=ctrl, tuneGrid=rf_grid, ntree=nt)
+    
+    tmp <- rf_model$results
+    tmp$ntree <- nt
+
+    tuning_results <- rbind(tuning_results, tmp)
+  }
+  
+  best_params <- tuning_results[which.min(tuning_results$RMSE), 
+                                c("mtry", "ntree", "RMSE", "Rsquared")]
+  
+  return(best_params)
+}
+```
+
+
+```{r}
+# Best parameters for df_top12, df_c1_top12 and df_c2_top12.
+rf_best_params_top12 <- find_rf_best_params(df_top12,
+                                            response=target)
+rf_best_params_c1_top12 <- find_rf_best_params(df_c1_top12,
+                                               response=target)
+rf_best_params_c2_top12 <- find_rf_best_params(df_c2_top12,
+                                               response=target)
+rf_best_params_top12  # mtry=2, ntree=200 
+rf_best_params_c1_top12  # mtry=4, ntree=500 
+rf_best_params_c2_top12  # mtry=2, ntree=200 
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# rf_best_params_cX_top12 <- find_rf_best_params(df_cX_top12,
+#                                                response=target)
+# rf_best_params_cX_top12  # Replace X and record results here.
+```
+
+
+```{r}
+# Cross-Validation for Random Forest with optimal parameters. 
+set.seed(1234)
+rf_top12 <- train(as.formula(paste(target, "~.")), 
+                  data=df_top12, method="rf", trControl=ctrl, 
+                  tuneGrid=expand.grid(
+                    mtry=rf_best_params_top12$mtry),
+                  ntree=rf_best_params_top12$ntree, metric="RMSE")
+set.seed(1234)
+rf_c1_top12 <- train(as.formula(paste(target, "~.")), 
+                     data=df_c1_top12, method="rf", trControl=ctrl, 
+                     tuneGrid=expand.grid(
+                       mtry=rf_best_params_c1_top12$mtry),
+                     ntree=rf_best_params_c1_top12$ntree, metric="RMSE")
+set.seed(1234)
+rf_c2_top12 <- train(as.formula(paste(target, "~.")), 
+                     data=df_c2_top12, method="rf", trControl=ctrl, 
+                     tuneGrid=expand.grid(
+                       mtry=rf_best_params_c2_top12$mtry),
+                     ntree=rf_best_params_c2_top12$ntree, metric="RMSE")
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# set.seed(1234)
+# rf_cX_top12 <- train(as.formula(paste(target, "~.")), 
+#                      data=df_cX_top12, method="rf", trControl=ctrl, 
+#                      tuneGrid=expand.grid(
+#                        mtry=rf_best_params_cX_top12$mtry),
+#                      ntree=rf_best_params_cX_top12$ntree, metric="RMSE")
+
+
+results_rf <- rbind(rf_top12$results, 
+                    rf_c1_top12$results, 
+                    rf_c2_top12$results
+                    # , rf_cX_top12$results  # Replace X
+                    ) %>%
+  dplyr::select(RMSE, Rsquared)
+rownames(results_rf) <- c("rf_df_top12", 
+                          "rf_df_c1_top12", 
+                          "rf_df_c2_top12"
+                          # , "rf_df_cX_top12"  # Replace X
+                          )
+results_rf
+```
+
+
+## Gradient Boosting (GBM)   
+No standardization needed, need parameter-tuning.   
+Use this code chunk for bigger dataset, such as team's 1st & 2nd target. 
+```{r}
+# Function to find best parameters for GBM (Try not to change this part)
+find_gbm_best_params <- function(df, response, k_fold=5) {
+
+  ctrl <- trainControl(method="cv", number=k_fold)
+  tuning_results <- data.frame()
+
+  gbm_grid <- expand.grid(n.trees=c(100,200,500),
+                          interaction.depth=c(1,3,5),
+                          shrinkage=c(0.01,0.05,0.1),
+                          n.minobsinnode=c(5,10,20))
+
+  set.seed(1234)
+  gbm_model <- train(as.formula(paste(response, "~.")),
+                     data=df, method="gbm",
+                     metric="RMSE", trControl=ctrl,
+                     tuneGrid=gbm_grid, verbose=FALSE)
+
+  best_params <- gbm_model$bestTune
+  return(best_params)
+}
+```
+
+
+Un-comment to use this code chunk for smaller dataset, such as team's 3rd target.   
+```{r}
+# # Function to find best parameters for GBM (Try not to change this part!)
+# find_gbm_best_params <- function(df, response, k_fold = 5) {
+# 
+#   ctrl <- trainControl(method = "cv", number = k_fold)
+#   tuning_results <- data.frame()
+# 
+#   # Minimal tweak: drop the riskiest leaf size 20
+#   gbm_grid <- expand.grid(
+#     n.trees = c(100, 200, 500),
+#     interaction.depth = c(1, 3, 5),
+#     shrinkage = c(0.01, 0.05, 0.1),
+#     n.minobsinnode = c(5, 10)   # removed 20 only
+#   )
+# 
+#   set.seed(1234)
+#   gbm_model <- train(
+#     as.formula(paste(response, "~.")),
+#     data = df,
+#     method = "gbm",
+#     metric = "RMSE",
+#     trControl = ctrl,
+#     tuneGrid = gbm_grid,
+#     preProcess = c("medianImpute", "zv", "center", "scale"),  # drop per-fold constants
+#     verbose = FALSE,
+#     distribution = "gaussian",   # <-- ensure regression
+#     bag.fraction = 0.80          # <-- more in-bag rows; reduces constraint failures
+#   )
+# 
+#   best_params <- gbm_model$bestTune
+#   return(best_params)
+# }
+```
+
+
+```{r}
+# Best parameters for df_top12, df_c1_top12 and df_c2_top12.
+gbm_best_params_top12 <- find_gbm_best_params(df_top12,
+                                              response=target)
+gbm_best_params_c1_top12 <- find_gbm_best_params(df_c1_top12,
+                                                 response=target)
+gbm_best_params_c2_top12 <- find_gbm_best_params(df_c2_top12,
+                                                 response=target)
+gbm_best_params_top12  
+# n.trees=100, interaction.depth=5, shrinkage=0.01, n.minobsinnode=20
+gbm_best_params_c1_top12  
+# n.trees=500, interaction.depth=5, shrinkage=0.01, n.minobsinnode=10
+gbm_best_params_c2_top12  
+# n.trees=100, interaction.depth=5, shrinkage=0.01, n.minobsinnode=10
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# gbm_best_params_cX_top12 <- find_gbm_best_params(df_cX_top12,
+#                                                  response=target)
+# gbm_best_params_cX_top12  # Replace X and record results here.
+```
+
+
+```{r, warning=FALSE}
+# Cross-Validation for GBM with optimal parameters. 
+set.seed(1234)
+gbm_top12 <- train(as.formula(paste(target, "~.")), 
+                   data=df_top12, method="gbm", trControl=ctrl, 
+                   tuneGrid=expand.grid(
+                     n.trees=gbm_best_params_top12$n.trees, 
+                     interaction.depth=gbm_best_params_top12$interaction.depth, 
+                     shrinkage=gbm_best_params_top12$shrinkage, 
+                     n.minobsinnode=gbm_best_params_top12$n.minobsinnode), 
+                   distribution = "gaussian",
+                   metric="RMSE", verbose=FALSE)
+set.seed(1234)
+gbm_c1_top12 <- train(as.formula(paste(target, "~.")), 
+                      data=df_c1_top12, method="gbm", trControl=ctrl, 
+                      tuneGrid=expand.grid(
+                        n.trees=gbm_best_params_c1_top12$n.trees, 
+                        interaction.depth=gbm_best_params_c1_top12$interaction.depth, 
+                        shrinkage=gbm_best_params_c1_top12$shrinkage, 
+                        n.minobsinnode=gbm_best_params_c1_top12$n.minobsinnode), 
+                      distribution = "gaussian",
+                      metric="RMSE", verbose=FALSE)
+set.seed(1234)
+gbm_c2_top12 <- train(as.formula(paste(target, "~.")), 
+                      data=df_c2_top12, method="gbm", trControl=ctrl, 
+                      tuneGrid=expand.grid(
+                        n.trees=gbm_best_params_c2_top12$n.trees, 
+                        interaction.depth=gbm_best_params_c2_top12$interaction.depth, 
+                        shrinkage=gbm_best_params_c2_top12$shrinkage, 
+                        n.minobsinnode=gbm_best_params_c2_top12$n.minobsinnode),  
+                      distribution = "gaussian",
+                      metric="RMSE", verbose=FALSE)
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# set.seed(1234)
+# gbm_cX_top12 <- train(as.formula(paste(target, "~.")), 
+#                       data=df_cX_top12, method="gbm", trControl=ctrl, 
+#                       tuneGrid=expand.grid(
+#                         n.trees=gbm_best_params_cX_top12$n.trees, 
+#                         interaction.depth=gbm_best_params_cX_top12$interaction.depth, 
+#                         shrinkage=gbm_best_params_cX_top12$shrinkage, 
+#                         n.minobsinnode=gbm_best_params_cX_top12$n.minobsinnode),  
+#                       distribution = "gaussian",
+#                       metric="RMSE", verbose=FALSE)
+
+
+results_gbm <- rbind(gbm_top12$results, 
+                     gbm_c1_top12$results, 
+                     gbm_c2_top12$results
+                     # , gbm_cX_top12$results  # Replace X
+                     ) %>%
+  dplyr::select(RMSE, Rsquared)
+rownames(results_gbm) <- c("gbm_df_top12", 
+                           "gbm_df_c1_top12", 
+                           "gbm_df_c2_top12"
+                           # , "gbm_df_cX_top12"  # Replace X
+                           )
+results_gbm
+```
+
+
+## Support Vector Regression (SVR), same as nonlinear SVM using RBF kernel.  
+Need standardization and parameter-tuning.
+```{r}
+# Function to find best parameters for SVR (Do not change this part!)
+find_svr_best_params <- function(df, response, k_fold=5) {
+  
+  ctrl <- trainControl(method="cv", number=k_fold)
+
+  set.seed(1234)
+  svr_model <- train(as.formula(paste(response, "~.")), 
+                     data=df, method="svmRadialSigma",  # auto sigma
+                     metric="RMSE", trControl=ctrl, 
+                     preProcess = c("zv"),  # Edited: drop per-fold constant cols
+                     tuneLength=10)  # explores C values
+    
+  best_params <- svr_model$bestTune
+  return(best_params)
+}
+```
+
+
+```{r}
+# Best parameters for df_top12, df_c1_top12 and df_c2_top12.
+svr_best_params_top12 <- find_svr_best_params(df_top12_scaled, response=target)
+svr_best_params_c1_top12 <- find_svr_best_params(df_c1_top12_scaled, response=target)
+svr_best_params_c2_top12 <- find_svr_best_params(df_c2_top12_scaled, response=target)
+svr_best_params_top12  # sigma=0.0264, C=1
+svr_best_params_c1_top12  # sigma=0.0443, C=4
+svr_best_params_c2_top12  # sigma=0.0921, C=1
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# svr_best_params_cX_top12 <- find_svr_best_params(df_cX_top12_scaled, response=target)
+# svr_best_params_cX_top12
+```
+
+
+```{r}
+# Cross-Validation for SVR with optimal parameters. 
+set.seed(1234)
+svr_top12 <- train(as.formula(paste(target, "~.")), 
+                   data=df_top12_scaled, 
+                   method="svmRadial", trControl=ctrl, 
+                   tuneGrid=expand.grid(sigma=svr_best_params_top12$sigma, 
+                                        C=svr_best_params_top12$C), 
+                   preProcess=c("zv"),  # Edited: drop per-fold constant cols
+                   metric="RMSE", verbose=FALSE)
+set.seed(1234)
+svr_c1_top12 <- train(as.formula(paste(target, "~.")), 
+                      data=df_c1_top12_scaled, 
+                      method="svmRadial", trControl=ctrl, 
+                      tuneGrid=expand.grid(sigma=svr_best_params_c1_top12$sigma, 
+                                           C=svr_best_params_c1_top12$C), 
+                      preProcess=c("zv"),  # Edited: drop per-fold constant cols
+                      metric="RMSE", verbose=FALSE)
+set.seed(1234)
+svr_c2_top12 <- train(as.formula(paste(target, "~.")), 
+                      data=df_c2_top12_scaled, 
+                      method="svmRadial", trControl=ctrl, 
+                      tuneGrid=expand.grid(sigma=svr_best_params_c2_top12$sigma, 
+                                           C=svr_best_params_c2_top12$C), 
+                      preProcess=c("zv"),  # Edited: drop per-fold constant cols
+                      metric="RMSE", verbose=FALSE)
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# set.seed(1234)
+# svr_cX_top12 <- train(as.formula(paste(target, "~.")), 
+#                       data=df_cX_top12_scaled, 
+#                       method="svmRadial", trControl=ctrl, 
+#                       tuneGrid=expand.grid(sigma=svr_best_params_cX_top12$sigma, 
+#                                            C=svr_best_params_cX_top12$C), 
+#                       metric="RMSE", verbose=FALSE)
+
+
+results_svr <- rbind(svr_top12$results, 
+                     svr_c1_top12$results, 
+                     svr_c2_top12$results
+                     # , svr_cX_top12$results  # Replace X
+                     ) %>%
+  dplyr::select(RMSE, Rsquared)
+rownames(results_svr) <- c("svr_df_top12", 
+                           "svr_df_c1_top12", 
+                           "svr_df_c2_top12"
+                           # , "svr_df_cX_top12"  # Replace X
+                           )
+results_svr
+```
+
+
+## Gather all results.
+```{r}
+results <- rbind(results_lm, results_gam_linear, results_gam_spline, 
+                 results_rf, results_gbm, results_svr)
+results_top12 <- results %>%
+  filter(grepl("df_top12", row.names(results))) %>%
+  arrange(RMSE)
+results_c1_top12 <- results %>%
+  filter(grepl("df_c1_top12", row.names(results))) %>%
+  arrange(RMSE)
+results_c2_top12 <- results %>%
+  filter(grepl("df_c2_top12", row.names(results))) %>%
+  arrange(RMSE)
+results_top12
+results_c1_top12
+results_c2_top12
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# results_cX_top12 <- results %>%
+#   filter(grepl("df_cX_top12", row.names(results))) %>%
+#   arrange(RMSE)
+# results_cX_top12
+```
+
+**1st target**:  
+Based on the results above, the models for Cluster 1 perform better than those for Cluster 2, demonstrated by lower RMSE values and higher R‑squared scores. When predictions are made on the full dataset, the performance averages out across clusters. Therefore, building models at the segment level is more effective, as it allows us to preserve the stronger predictive accuracy observed in Cluster 1.    
+
+
+## Paried T-test and Wilcox-test for Cluster 1 data on top performance models.
+```{r}
+# Extract Top 3 models from Cluster 1.
+c1_1st_model <- paste0(sub("_df_c1_top12$", "", rownames(results_c1_top12)[1]),
+                       "_c1_top12")
+c1_1st_model <- get(c1_1st_model)
+c1_2nd_model <- paste0(sub("_df_c1_top12$", "", rownames(results_c1_top12)[2]),
+                       "_c1_top12")
+c1_2nd_model <- get(c1_2nd_model)
+c1_3rd_model <- paste0(sub("_df_c1_top12$", "", rownames(results_c1_top12)[3]),
+                       "_c1_top12")
+c1_3rd_model <- get(c1_3rd_model)
+
+### -------- 1st vs 2nd -------- ###
+# RMSE
+c1_tt12_rmse  <- t.test(c1_1st_model$resample$RMSE,
+                        c1_2nd_model$resample$RMSE,
+                        paired = TRUE)
+c1_wil12_rmse <- wilcox.test(c1_1st_model$resample$RMSE,
+                             c1_2nd_model$resample$RMSE,
+                             paired = TRUE)
+# R2
+c1_tt12_r2  <- t.test(c1_1st_model$resample$Rsquared,
+                      c1_2nd_model$resample$Rsquared,
+                      paired = TRUE)
+c1_wil12_r2 <- wilcox.test(c1_1st_model$resample$Rsquared,
+                           c1_2nd_model$resample$Rsquared,
+                           paired = TRUE)
+
+### -------- 2nd vs 3rd -------- ###
+# RMSE
+c1_tt23_rmse  <- t.test(c1_2nd_model$resample$RMSE,
+                        c1_3rd_model$resample$RMSE,
+                        paired = TRUE)
+c1_wil23_rmse <- wilcox.test(c1_2nd_model$resample$RMSE,
+                             c1_3rd_model$resample$RMSE,
+                             paired = TRUE)
+# R2
+c1_tt23_r2  <- t.test(c1_2nd_model$resample$Rsquared,
+                      c1_3rd_model$resample$Rsquared,
+                      paired = TRUE)
+c1_wil23_r2 <- wilcox.test(c1_2nd_model$resample$Rsquared,
+                           c1_3rd_model$resample$Rsquared,
+                           paired = TRUE)
+
+### -------- Combine into a simple table -------- ###
+c1_results_pair_tests <- data.frame(
+  Comparison = c("1st vs 2nd", "1st vs 2nd",
+                 "2nd vs 3rd", "2nd vs 3rd"),
+  Metric     = c("RMSE", "Rsquared",
+                 "RMSE", "Rsquared"),
+  Mean_Diff  = c(c1_tt12_rmse$estimate, c1_tt12_r2$estimate,
+                 c1_tt23_rmse$estimate, c1_tt23_r2$estimate),
+  p_t        = c(c1_tt12_rmse$p.value, c1_tt12_r2$p.value,
+                 c1_tt23_rmse$p.value, c1_tt23_r2$p.value),
+  p_wilcox   = c(c1_wil12_rmse$p.value, c1_wil12_r2$p.value,
+                 c1_wil23_rmse$p.value, c1_wil23_r2$p.value)
+)
+
+c1_results_pair_tests
+```
+
+**1st target**:   
+For Cluster 1 data with Top 12 features:   
+The p-value for RMSE from all tests, 1st vs 2nd, 2nd vs 3rd, are all greater than 0.05, indicating the difference between models are not statistically significant, and probably due to randomness.    
+The p-value for R-squared, 1st vs 2nd are greater than 0.05; but 2nd vs 3rd, are all smaller than 0.05, meaning the difference is statistically significant, 2nd (GBM) performs better than 3rd (SVR) on R-squared.   
+
+Therefore, for **Cluster 1**, **Random Forest** and **Gradient Boosting** perform the best for both RMSE and R-squared, but the difference is not statistically significant, and probably due to randomness.  
+
+
+## Paried T-test and Wilcox-test for Cluster 2 data on top performance models.
+```{r}
+# Extract Top 3 models from Cluster 1.
+c2_1st_model <- paste0(sub("_df_c2_top12$", "", rownames(results_c2_top12)[1]),
+                       "_c2_top12")
+c2_1st_model <- get(c2_1st_model)
+c2_2nd_model <- paste0(sub("_df_c2_top12$", "", rownames(results_c2_top12)[2]),
+                       "_c2_top12")
+c2_2nd_model <- get(c2_2nd_model)
+c2_3rd_model <- paste0(sub("_df_c2_top12$", "", rownames(results_c2_top12)[3]),
+                       "_c2_top12")
+c2_3rd_model <- get(c2_3rd_model)
+
+### -------- 1st vs 2nd -------- ###
+# RMSE
+c2_tt12_rmse  <- t.test(c2_1st_model$resample$RMSE,
+                        c2_2nd_model$resample$RMSE,
+                        paired = TRUE)
+c2_wil12_rmse <- wilcox.test(c2_1st_model$resample$RMSE,
+                             c2_2nd_model$resample$RMSE,
+                             paired = TRUE)
+# R2
+c2_tt12_r2  <- t.test(c2_1st_model$resample$Rsquared,
+                      c2_2nd_model$resample$Rsquared,
+                      paired = TRUE)
+c2_wil12_r2 <- wilcox.test(c2_1st_model$resample$Rsquared,
+                           c2_2nd_model$resample$Rsquared,
+                           paired = TRUE)
+
+### -------- 2nd vs 3rd -------- ###
+# RMSE
+c2_tt23_rmse  <- t.test(c2_2nd_model$resample$RMSE,
+                        c2_3rd_model$resample$RMSE,
+                        paired = TRUE)
+c2_wil23_rmse <- wilcox.test(c2_2nd_model$resample$RMSE,
+                             c2_3rd_model$resample$RMSE,
+                             paired = TRUE)
+# R2
+c2_tt23_r2  <- t.test(c2_2nd_model$resample$Rsquared,
+                      c2_3rd_model$resample$Rsquared,
+                      paired = TRUE)
+c2_wil23_r2 <- wilcox.test(c2_2nd_model$resample$Rsquared,
+                           c2_3rd_model$resample$Rsquared,
+                           paired = TRUE)
+
+### -------- Combine into a simple table -------- ###
+c2_results_pair_tests <- data.frame(
+  Comparison = c("1st vs 2nd", "1st vs 2nd",
+                 "2nd vs 3rd", "2nd vs 3rd"),
+  Metric     = c("RMSE", "Rsquared",
+                 "RMSE", "Rsquared"),
+  Mean_Diff  = c(c2_tt12_rmse$estimate, c2_tt12_r2$estimate,
+                 c2_tt23_rmse$estimate, c2_tt23_r2$estimate),
+  p_t        = c(c2_tt12_rmse$p.value, c2_tt12_r2$p.value,
+                 c2_tt23_rmse$p.value, c2_tt23_r2$p.value),
+  p_wilcox   = c(c2_wil12_rmse$p.value, c2_wil12_r2$p.value,
+                 c2_wil23_rmse$p.value, c2_wil23_r2$p.value)
+)
+
+c2_results_pair_tests
+```
+
+**1st target**:   
+For Cluster 2 data with Top 12 features:  
+The p-value from all tests, 1st vs 2nd, 2nd vs 3rd, both RMSE and R-squared are all greater than 0.05, indicating the difference between models are not statistically significant, and probably due to randomness.   
+
+Although SVR shows the lowest raw RMSE, the differences across SVR, GBM, and RF are not statistically significant based on paired t-tests and Wilcoxon signed-rank tests. Because GBM (and RF) provide greater model stability, better interpretability, and stronger robustness to noise and hyperparameter sensitivity, while achieving equivalent predictive performance; therefore, for **Cluster 2**, **GBM/RF** are better choices as the final model.  
+
+
+```{r}
+# If you have more than 2 clusters, copy above code chunk for Cluster 2, then replace all "c2" with your cluster number.
+```
+
+
+## Try fewer features for Cluster 1 for model RF and GBM. 
+```{r}
+# To reduce computational cost, use 5-fold CV instead of 10-fold
+set.seed(1234)
+ctrl2 <- trainControl(method="cv", number=5, savePredictions="final")
+```
+
+
+## Function to compare TopN features for RF. (Try not to change this part!)
+```{r}
+rf_topN_compare <- function(df, top_features, prefix="rf_df_top") {
+  results_rf_feature <- NULL
+  
+  for (i in 12:4) {
+    cat("Working on Top", i, "features...\n")
+    
+    # Prepare dataset with top-i features
+    df_topN <- df %>%
+      dplyr::select(!!rlang::sym(target), dplyr::all_of(top_features[1:i]))
+    
+    # Get best params for THIS subset
+    best_params <- find_rf_best_params(df_topN, response=target)
+    mtry_best <- best_params$mtry
+    ntree_best <- best_params$ntree
+    
+    # (Optional safety defaults, in case the function returns NULL/NA)
+    if (is.null(mtry_best) || is.na(mtry_best)) mtry_best <- 2
+    if (is.null(ntree_best) || is.na(ntree_best)) ntree_best <- 200
+    
+    # Train RF using the subset-specific best params
+    set.seed(1234)
+    rf_topN <- caret::train(
+      stats::as.formula(paste(target, "~.")),
+      data      = df_topN,
+      method    = "rf",
+      trControl = ctrl2,
+      tuneGrid  = data.frame(mtry = mtry_best),
+      ntree     = ntree_best,
+      metric    = "RMSE")
+    
+    # Collect results
+    result <- rf_topN$results
+    result$ntree <- ntree_best   # add ntree column manually
+    rownames(result) <- paste0(prefix, i)
+    
+    results_rf_feature <- rbind(
+      results_rf_feature,
+      result[, c("RMSE", "Rsquared", "mtry", "ntree")]
+    )
+  }
+  
+  # Final table
+  results_rf_feature <- results_rf_feature %>%
+    dplyr::arrange(RMSE)
+  
+  return(results_rf_feature)
+}
+```
+
+
+## Function to compare TopN features for GBM. (Try not to change this part!)
+```{r}
+gbm_topN_compare <- function(df, top_features, prefix="gbm_df_top") {
+  results_gbm_feature <- NULL
+  
+  for (i in 12:4) {
+    cat("Working on Top", i, "features...\n")
+    
+    # Prepare dataset with top-i features
+    df_topN <- df %>%
+      dplyr::select(!!rlang::sym(target), dplyr::all_of(top_features[1:i]))
+    
+    # Get best params for THIS subset
+    best_params <- find_gbm_best_params(df=df_topN, response=target, k_fold=5)
+    ntrees_best <- best_params$n.trees
+    depth_best  <- best_params$interaction.depth
+    eta_best    <- best_params$shrinkage
+    nmin_best   <- best_params$n.minobsinnode
+    
+    # (Optional safety defaults, in case the function returns NULL/NA)
+    if (is.null(ntrees_best) || is.na(ntrees_best)) ntrees_best <- 200
+    if (is.null(depth_best)  || is.na(depth_best))  depth_best  <- 3
+    if (is.null(eta_best)    || is.na(eta_best))    eta_best    <- 0.05
+    if (is.null(nmin_best)   || is.na(nmin_best))   nmin_best   <- 10
+    
+    # Train GBM using the subset-specific best params
+    set.seed(1234)
+    gbm_topN <- caret::train(
+      stats::as.formula(paste(target, "~.")),
+      data      = df_topN,
+      method    = "gbm",
+      trControl = ctrl2,
+      tuneGrid  = expand.grid(
+        n.trees           = ntrees_best,
+        interaction.depth = depth_best,
+        shrinkage         = eta_best,
+        n.minobsinnode    = nmin_best),
+      metric    = "RMSE",
+      verbose   = FALSE)
+    
+    # Collect results
+    result <- gbm_topN$results
+    result$n.trees           <- ntrees_best
+    result$interaction.depth <- depth_best
+    result$shrinkage         <- eta_best
+    result$n.minobsinnode    <- nmin_best
+    
+    rownames(result) <- paste0(prefix, i)
+    
+    results_gbm_feature <- rbind(
+      results_gbm_feature,
+      result[, c("RMSE", "Rsquared",
+                 "n.trees", "interaction.depth",
+                 "shrinkage", "n.minobsinnode")])
+  }
+  
+  # Sort by RMSE
+  results_gbm_feature <- results_gbm_feature %>%
+    dplyr::arrange(RMSE)
+  
+  return(results_gbm_feature)
+}
+```
+
+
+```{r}
+# Cluster 1 RF.
+results_rf_feature_c1 <- rf_topN_compare(
+  df=df_c1, 
+  top_features=top12_feature$Top12_Cluster1,
+  prefix="rf_df_c1_top")
+results_rf_feature_c1
+```
+
+
+```{r}
+# Cluster 1 GBM.
+results_gbm_feature_c1 <- gbm_topN_compare(
+  df=df_c1,
+  top_features=top12_feature$Top12_Cluster1,
+  prefix="gbm_df_c1_top")
+results_gbm_feature_c1
+```
+
+
+**Feature Count Selection Policy**:    
+Model configurations with RMSE within 1% of the best-performing model were retained, and those using 5–6 features were prioritized to balance predictive performance and usability in the Shiny application. When multiple candidates met this criterion, the configuration with the highest R² was selected; if none fell within the preferred feature range, the configuration with the smallest feature count within the RMSE tolerance was chosen, using R² as a tie‑breaker.   
+
+
+Our team's best model selection will not be based only on lowest RMSE, instead, we'll apply this **Feature Count Selection Policy** to help select the best model.   
+
+
+```{r}
+# Best topN predictive features for Cluster 1
+M <- 7  # M is the last number of your selected model's name for Cluster 1
+top12_feature$Top12_Cluster1[1:M]  # Record in Pipeline 3
+```
+
+
+```{r}
+# Cluster 2 RF. 
+results_rf_feature_c2 <- rf_topN_compare(
+  df=df_c2, 
+  top_features=top12_feature$Top12_Cluster2,
+  prefix="rf_df_c2_top")
+results_rf_feature_c2
+```
+
+
+```{r, warning=FALSE}
+# Cluster 2 GBM.
+results_gbm_feature_c2 <- gbm_topN_compare(
+  df=df_c2,
+  top_features=top12_feature$Top12_Cluster2,
+  prefix="gbm_df_c2_top")
+results_gbm_feature_c2
+```
+
+
+```{r}
+# Best topN predictive features for Cluster 2
+N <- 6    # N is the last number of your selected model's name for Cluster 2 
+top12_feature$Top12_Cluster2[1:N]    # Record in Pipeline 3
+```
+
+
+```{r}
+# If you have more than 2 clusters, replace X with your cluster number.
+# Cluster X RF. 
+# results_rf_feature_cX <- rf_topN_compare(
+#   df=df_cX, 
+#   top_features=top12_feature$Top12_ClusterX,
+#   prefix="rf_df_cX_top")
+# results_rf_feature_cX
+# 
+# # Cluster X GBM.
+# results_gbm_feature_cX <- gbm_topN_compare(
+#   df=df_cX,
+#   top_features=top12_feature$Top12_ClusterX,
+#   prefix="gbm_df_cX_top")
+# results_gbm_feature_cX
+```
+
+
+```{r}
+# Best topN predictive features for Cluster 2
+# P <- x    # P is the last number of your selected model's name for Cluster X 
+# top12_feature$Top12_Cluster2[1:P]    # Record in Pipeline 3
+```
+
+
+================================================================================   
+Please record the segment-level best predictive features and best model with optimal parameters in Pipeline3.  
+(Located in the Pipeline3 section in "Pipeline1&3 - feature selection, clustering & optimal models for Shiny")  
+================================================================================  
+

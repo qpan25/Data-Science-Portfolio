@@ -1,0 +1,347 @@
+---
+title: "EDA_GS"
+author: 'Gulmira Zhavgasheva'
+date: "2026-02-20"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+getwd()
+```
+
+### Libraries:
+```{r}
+pkgs <- c("skimr", "ggplot2", "GGally", "corrplot", "dplyr",
+  "catdap", "rcompanion", "car", "caret", "e1071", "readr", 
+  "ROCR", "caTools", "lubridate", "stringr", "readxl"
+)
+
+for (p in pkgs) {
+  suppressPackageStartupMessages(
+    library(p, character.only = TRUE, warn.conflicts = FALSE)
+  )
+}
+
+```
+
+### Reading the GS table:
+```{r, echo=FALSE, out.width = '70%'}
+gs_deploys <- read_csv("C:/Users/gzhavgas/Downloads/Project_R/GS_deploys.csv", show_col_types = FALSE)
+
+
+# USE account_join_FINAL_without_target.csv:
+
+second_target <- read_csv("C:/Users/gzhavgas/Downloads/Project_R/account_join_FINAL_without_target.csv", show_col_types = FALSE)
+
+summary(second_target)
+#head(second_target, 10)
+
+```
+
+
+```{r}
+# Extracting Account_IDs from the second_target table: chr [1:1750] unique IDs:
+
+account_ids <- second_target$ACCOUNT_ID
+glimpse(account_ids)
+unique_st_ids <- unique(second_target$ACCOUNT_ID)
+
+```
+
+```{r}
+# unique accounts [1:1359] in the GS table:
+unique_gs_ids <- unique(gs_deploys$ACCOUNT_ID)
+glimpse(unique_gs_ids)
+
+# Snapshot range: from "2018-12-30" to "2026-01-12":
+range(gs_deploys$SNAPSHOT_DATE, na.rm = TRUE)
+
+# There are 5480 NA accounts (no identification):
+sum(is.na(gs_deploys$ACCOUNT_ID))
+
+# There are 2164227 records in the GS table:
+nrow(gs_deploys)
+
+```
+```{r}
+# Extracting all rows with NA_Account_ID:
+
+GS_na_accounts <- gs_deploys %>%
+  filter(is.na(ACCOUNT_ID))
+
+glimpse(GS_na_accounts)
+
+```
+```{r}
+# Extracting a subset of NA Account_IDs with relevant data:
+GS_na_accounts <- GS_na_accounts %>%
+  dplyr::select(SNAPSHOT_DATE, ENGAGEMENT_CLOUD_COUNT)
+head(GS_na_accounts, 20)
+
+# Counting how many NAs are in ENGAGEMENT_CLOUD_COUNT:
+sum(is.na(GS_na_accounts$ENGAGEMENT_CLOUD_COUNT))
+
+# Since there're also 5480 NA values in ENGAGEMENT_CLOUD_COUNT, 
+# we should delete corresponding Account_IDs with NA values:
+gs_clean_accounts <- gs_deploys %>%
+  filter(!is.na(ACCOUNT_ID))
+
+# Sanity check - to confirm 5480 accounts were indeed removed:
+nrow(gs_clean_accounts)
+
+# Checking how many unique accounts were left. 
+# We initially had 1359, now we have 1358 - checked the csv table manually, too:
+unique_gs <- unique(gs_clean_accounts$ACCOUNT_ID)
+glimpse(unique_gs)
+
+```
+```{r}
+# Filtering the GS table by Account_ID that have to have the latest_snapshot_date 
+# with a non-NA value in ENGAGEMENT_CLOUD_COUNT the past "2025-01-01":
+gs_engagement_latest <- gs_clean_accounts %>%
+  filter(!is.na(ENGAGEMENT_CLOUD_COUNT)) %>%
+  group_by(ACCOUNT_ID) %>%
+  mutate(latest_snapshot_date = max(SNAPSHOT_DATE, na.rm = TRUE)) %>%
+  filter(latest_snapshot_date > as.Date("2025-01-01")) %>%
+  mutate(ref_date_3m = latest_snapshot_date %m-% months(3)) %>%
+  filter(SNAPSHOT_DATE >= ref_date_3m) %>%
+  summarise(
+      latest_snapshot_date = first(latest_snapshot_date),
+      SNAPSHOT_DATE = max(SNAPSHOT_DATE),
+      GATEWAY_30_DAYS_COUNT = mean(GATEWAY_30_DAYS_COUNT, na.rm = TRUE),
+      ENGAGEMENT_CLOUD_COUNT = mean(ENGAGEMENT_CLOUD_COUNT, na.rm = TRUE),
+      .groups = "drop"
+)
+summary(gs_engagement_latest)
+
+```
+```{r}
+# Imputing NAs in the GATEWAY_30_DAYS_COUNT as median, since the max value is very large:
+median_gateway <- median(gs_engagement_latest$GATEWAY_30_DAYS_COUNT, na.rm = TRUE)
+gs_engagement_latest <- gs_engagement_latest %>%
+  mutate(GATEWAY_30_DAYS_COUNT = 
+           ifelse(is.na(GATEWAY_30_DAYS_COUNT),
+                  median_gateway,
+                  GATEWAY_30_DAYS_COUNT)
+    
+  )
+summary(gs_engagement_latest$GATEWAY_30_DAYS_COUNT)
+```
+
+```{r}
+# 0 values in GATEWAY_30_DAYS_COUNT:
+sum(gs_engagement_latest$GATEWAY_30_DAYS_COUNT == 0, na.rm = TRUE)
+```
+
+```{r}
+# There're 4 accounts with active Engagement but 0 Gateway count.
+# These 0s look like metrics that were not recorded.
+# I will remove these 4 accounts as anomalies. Their Gateway count might need to be 
+##### imputed with a median value.
+
+gs_engagement_latest %>%
+  filter(GATEWAY_30_DAYS_COUNT == 0)
+
+# New GS_engagement_clean table:
+gs_engagement_clean <- gs_engagement_latest %>%
+  filter(GATEWAY_30_DAYS_COUNT != 0)
+summary(gs_engagement_clean)
+
+
+```
+```{r}
+# Checking an overall number of non-NA Engagement records in the cleaned GS table:
+
+gs_engagement_clean %>%
+  filter(!is.na(ENGAGEMENT_CLOUD_COUNT)) %>%
+  summarise(n_rows = n())
+
+```
+
+```{r}
+# Sanity check to confirm that 442 is a valid number of 
+# Accounts with active Engagement past 2025-01-01:
+
+gs_engagement_clean %>%
+  filter(!is.na(ENGAGEMENT_CLOUD_COUNT)) %>%
+  summarise(
+    rows = n(),
+    accounts = n_distinct(ACCOUNT_ID)
+  )
+
+# There're indeed only 442 Accounts with active Engagement!
+gs_engagement_clean %>%
+  summarise(accounts = n_distinct(ACCOUNT_ID))
+
+# To save the above table locally:
+#write_csv(gs_engagement_clean, "GS_Eng_Clean.csv")
+
+
+```
+
+```{r}
+gs_engagement_clean %>%
+  filter(!is.na(ENGAGEMENT_CLOUD_COUNT)) %>%
+  group_by(ACCOUNT_ID) %>%
+  summarise(records = n()) %>%
+  summary()
+
+glimpse(gs_engagement_clean)
+
+```
+
+```{r}
+# Checking tables' length before merging these two tables (it yielded at 427 rows):
+length(intersect(second_target$ACCOUNT_ID, gs_engagement_clean$ACCOUNT_ID))
+
+```
+
+```{r}
+# Merging two datasets:
+final_second_target <- second_target %>%
+  inner_join(gs_engagement_clean, by = "ACCOUNT_ID")
+
+summary(final_second_target$ENGAGEMENT_CLOUD_COUNT)
+nrow(final_second_target)
+
+glimpse(final_second_target)
+
+```
+
+```{r}
+# Calculating Engagement_Adoption_Rate over 3-month time period
+# (both ENGAGEMENT_CLOUD_COUNT & GATEWAY_30_DAYS_COUNT are 3-month average).
+# Applying log10(1+x) to handle extreme right skew (mean value > median value), 
+# calculation is consistent with the signed log-method used for GIGA_PURCHASED_AMOUNT_log:
+
+final_second_target <- final_second_target %>%
+  dplyr::select(-1) %>%
+  mutate(
+    engagement_adoption_rate = log10(1 + ENGAGEMENT_CLOUD_COUNT/GATEWAY_30_DAYS_COUNT)
+  )
+
+glimpse(final_second_target)
+
+summary(final_second_target$engagement_adoption_rate)
+
+```
+
+```{r}
+# No 0s are in the Engagement_adoption_rate:
+table(final_second_target$engagement_adoption_rate == 0) 
+
+```
+
+```{r}
+# Need to filter out true 0s in the engagement to be able to run Feature Importance.
+# The final dataset doesn't have have 0 values in engagement:
+#final_second_target <- final_second_target %>%
+ # filter(ENGAGEMENT_CLOUD_COUNT == 0)
+
+
+#final_second_target <- final_second_target %>%
+  #dplyr::select(-c(latest_snapshot_date, SNAPSHOT_DATE))
+
+#write_csv(final_second_target, "Engagement_AR_427_full.csv") #engagement doesn't have 0s
+```
+
+
+
+```{r}
+# Rows with NAs:
+# TOTAL_BROADBAND_SUBS_SALES_INPUT - 2
+# N_COMPETITORS - 12
+# COMPETITOR_AS_PRIMARY_VENDOR -12
+# PENETRATION_RATE - 2
+
+NA_rows <- final_second_target %>%
+  filter(if_any(everything(), is.na))
+summary(NA_rows)
+
+
+```
+```{r}
+# checking NA records' connections between the variables:
+final_second_target %>%
+  filter(if_any(c(TOTAL_BROADBAND_SUBS_SALES_INPUT, N_COMPETITORS, COMPETITOR_AS_PRIMARY_VENDOR, PENETRATION_RATE), is.na)) %>%
+  select(ACCOUNT_ID, TOTAL_BROADBAND_SUBS_SALES_INPUT, N_COMPETITORS, COMPETITOR_AS_PRIMARY_VENDOR, PENETRATION_RATE) %>%
+  mutate(across(-ACCOUNT_ID, ~ifelse(is.na(.), "NA", "Ok")))
+
+
+
+```
+
+
+```{r}
+# Checking correlation of these 4 variables with Engagement before imputing them:
+cor(final_second_target$N_COMPETITORS,
+    final_second_target$engagement_adoption_rate,
+    use = "complete.obs")
+
+cor(final_second_target$COMPETITOR_AS_PRIMARY_VENDOR,
+    final_second_target$engagement_adoption_rate,
+    use = "complete.obs")
+
+cor(final_second_target$TOTAL_BROADBAND_SUBS_SALES_INPUT,
+    final_second_target$engagement_adoption_rate,
+    use = "complete.obs")
+
+cor(final_second_target$PENETRATION_RATE,
+    final_second_target$engagement_adoption_rate,
+    use = "complete.obs")
+
+```
+
+```{r}
+# 4-variable model to investigate the NAs only:
+model <- lm(engagement_adoption_rate ~ 
+              N_COMPETITORS + 
+              COMPETITOR_AS_PRIMARY_VENDOR +
+              TOTAL_BROADBAND_SUBS_SALES_INPUT +
+              PENETRATION_RATE,
+            data = final_second_target )
+summary(model)
+
+
+```
+
+```{r}
+# Imputing missing NAs in all 4 variables with median,
+# i.e. treating NAs as missing data, not structural zeros):
+final_second_target <- final_second_target %>%
+  mutate(across(
+    c(N_COMPETITORS, 
+      COMPETITOR_AS_PRIMARY_VENDOR, 
+      TOTAL_BROADBAND_SUBS_SALES_INPUT, 
+      PENETRATION_RATE),
+    ~ ifelse(is.na(.), median(., na.rm = TRUE), .)
+  ))
+
+sum(is.na(final_second_target$N_COMPETITORS))
+sum(is.na(final_second_target$COMPETITOR_AS_PRIMARY_VENDOR))
+sum(is.na(final_second_target$TOTAL_BROADBAND_SUBS_SALES_INPUT))
+sum(is.na(final_second_target$PENETRATION_RATE))
+
+```
+
+```{r}
+# Dropping columns no longer needed:
+
+final_second_target_last <- final_second_target %>%
+  dplyr::select(-c(latest_snapshot_date, SNAPSHOT_DATE, GATEWAY_30_DAYS_COUNT, ENGAGEMENT_CLOUD_COUNT))
+  
+names(final_second_target_last)
+```
+```{r}
+# Saving an updated Cloud Engagement Adoption Rate table:
+write_csv(final_second_target_last, "final_target_CEA_rate_upd.csv")
+
+```

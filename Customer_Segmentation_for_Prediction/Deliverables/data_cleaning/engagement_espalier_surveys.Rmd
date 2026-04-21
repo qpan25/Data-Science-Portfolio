@@ -1,0 +1,284 @@
+---
+title: "Data Cleaning - Engagement, Espalier & Surveys"
+author: "Xufei Lang"
+output: html_document
+date: "2026-01-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Download and install ODBC driver through this link: 
+https://sfc-repo.snowflakecomputing.com/odbc/win64/3.14.0/snowflake64_odbc-3.14.0.msi
+
+
+## Install Packages.
+```{r warning=FALSE message=FALSE}
+# install.packages(c("DBI", "dplyr","dbplyr","odbc"))  # remove the # sign to install packages.
+# install.packages("lubridate")
+library(DBI)
+library(dplyr)
+library(dbplyr)
+library(odbc)
+library(lubridate)
+library(stringr)
+library(tidyr)
+```
+
+
+## Connect to Snowflake.
+```{r}
+con <- dbConnect(
+  odbc::odbc(),
+  Driver     = "SnowflakeDSIIDriver",
+  Server     = "CALIX.snowflakecomputing.com",
+  Database   = "DOWNSTREAM_DATA_HUB",
+  Schema     = "GA_TECH_ML",
+  Warehouse  = "GA_TECH_ML_WH",
+  Role       = "FUNC_GA_TECH_ML",
+  Authenticator = "externalbrowser",
+  UID      = "",    # replace with your Firstname.Lastname@CALIX.COM
+  PWD      = ""    # replace with your password
+)
+
+# Test
+dbGetQuery(con, "select current_role(), current_warehouse(), current_database(), current_schema()")
+```
+
+
+#################### Engagement(comm,conn,virt) ####################
+
+## Pull tables from Snowflake.
+```{r}
+accounts <- dbGetQuery(con,"select * from accounts")   # change the table names as needed.
+community_activity <- dbGetQuery(con,"select * from community_activity")
+connexions_attendance <- dbGetQuery(con,"select * from connexions_attendance")
+virtual_engagement_attendance <- dbGetQuery(con,"select * from virtual_engagement_attendance")
+```
+
+
+## Prepare tables.
+```{r}
+# Accounts table
+account_id <- accounts %>% select(ACCOUNT_ID)
+account_id_list <- accounts$ACCOUNT_ID
+head(account_id)
+dim(account_id)
+```
+
+
+```{r}
+# Generate Normalized percentage weights table. 
+weights_table <- function(start_year = 2020, end_year = 2025, r = 0.5) {
+  years <- start_year:end_year
+  cols <- lapply(start_year:end_year, function(sy) {
+    yrs_win <- sy:end_year
+    age <- end_year - yrs_win
+    w_raw <- r ^ age
+    w <- w_raw / sum(w_raw)
+    col <- setNames(rep(0, length(years)), years)
+    col[as.character(yrs_win)] <- round(100 * w, 1)
+    col
+  })
+  df <- data.frame(
+    YEAR = years,
+    do.call(cbind, cols),
+    check.names = FALSE
+  )
+  names(df)[-1] <- sprintf("weight_%02d_%02d", start_year:end_year, end_year)
+  rownames(df) <- NULL
+  df
+}
+
+# Example:
+weights <- weights_table(2020, 2025, r=0.5)
+weights
+```
+
+
+```{r}
+# Community_activity table
+head(community_activity)
+dim(community_activity)
+comm <- community_activity %>%
+  filter(ACCOUNT_ID %in% account_id_list) %>%
+  select(ACCOUNT_ID, ID, CREATED_DATE) %>%
+  distinct(ID, .keep_all=TRUE) %>%
+  mutate(YEAR = year(CREATED_DATE)) %>%
+  filter(YEAR >= 2020) %>% # With geometric decay r=0.5, data older than ~5 years contributes almost nothing.
+  group_by(ACCOUNT_ID,YEAR) %>%
+  summarize(Comm_Cnt = n_distinct(ID), .groups='drop')
+head(comm)
+dim(comm)
+sort(unique(comm$YEAR))
+```
+
+```{r}
+# Apply normalized percentage weights to Community_activity table 
+comm_cnt <- comm %>%
+  left_join(weights[,c("YEAR","weight_2020_2025")], by="YEAR") %>%
+  mutate(weighted_value = Comm_Cnt*weight_2020_2025/100) %>%
+  group_by(ACCOUNT_ID) %>%
+  summarize(Community_Cnt = sum(weighted_value, na.rm=TRUE), .groups="drop")
+comm_cnt
+```
+
+
+```{r}
+# Connexions_attendance table
+head(connexions_attendance)
+dim(connexions_attendance)
+conn <- connexions_attendance %>%
+  filter(ACCOUNT_ID %in% account_id_list) %>%
+  filter(str_detect(CAMPAIGN_MEMBER_STATUS, regex("Attended", ignore_case=TRUE))) %>%
+  select(ACCOUNT_ID, CAMPAIGN_ID, FIRST_RESPONDED_AT_DATE) %>%
+  mutate(YEAR = year(FIRST_RESPONDED_AT_DATE)) %>%
+  filter(YEAR >= 2020) %>% # With geometric decay r=0.5, data older than ~5 years contributes almost nothing.
+  group_by(ACCOUNT_ID,YEAR) %>%
+  summarize(Conn_Cnt = n_distinct(CAMPAIGN_ID), .groups='drop')
+head(conn)
+dim(conn)
+sort(unique(conn$YEAR))
+```
+
+```{r}
+# Apply normalized percentage weights to Community_activity table 
+conn_cnt <- conn %>%
+  left_join(weights[,c("YEAR","weight_2020_2025")], by="YEAR") %>%
+  mutate(weighted_value = Conn_Cnt*weight_2020_2025/100) %>%
+  group_by(ACCOUNT_ID) %>%
+  summarize(Connexion_Cnt = sum(weighted_value, na.rm=TRUE), .groups="drop")
+conn_cnt
+```
+
+
+```{r}
+# Virtual_engagement_attendance table
+head(virtual_engagement_attendance)
+dim(virtual_engagement_attendance)
+virt <- virtual_engagement_attendance %>%
+  filter(ACCOUNT_ID %in% account_id_list) %>%
+  filter(str_detect(CAMPAIGN_MEMBER_STATUS, regex("Attended", ignore_case=TRUE))) %>%
+  select(ACCOUNT_ID, CAMPAIGN_ID, FIRST_RESPONDED_AT_DATE) %>%
+  mutate(YEAR = year(FIRST_RESPONDED_AT_DATE)) %>%
+  filter(YEAR >= 2020) %>% # With geometric decay r=0.5, data older than ~5 years contributes almost nothing.
+  group_by(ACCOUNT_ID,YEAR) %>%
+  summarize(Virt_Cnt = n_distinct(CAMPAIGN_ID), .groups='drop')
+head(virt)
+dim(virt)
+sort(unique(virt$YEAR))
+```
+
+```{r}
+# Apply normalized percentage weights to Community_activity table 
+virt_cnt <- virt %>%
+  left_join(weights[,c("YEAR","weight_2020_2025")], by="YEAR") %>%
+  mutate(weighted_value = Virt_Cnt*weight_2020_2025/100) %>%
+  group_by(ACCOUNT_ID) %>%
+  summarize(Virtual_Cnt = sum(weighted_value, na.rm=TRUE), .groups="drop")
+virt_cnt
+```
+
+
+## Join all three tables together to create a new dataframe, name it as Engagement
+```{r}
+Engagement <- account_id %>%
+  left_join(comm_cnt, by="ACCOUNT_ID") %>%
+  left_join(conn_cnt, by="ACCOUNT_ID") %>%
+  left_join(virt_cnt, by="ACCOUNT_ID") %>%
+  mutate(across(everything(), ~ replace_na(.x, 0))) %>%
+  mutate(Log_Community_Cnt = round(log10(Community_Cnt+1),3)) %>%
+  mutate(Log_Virtual_Cnt = round(log10(Virtual_Cnt+1),3)) %>%
+  select(ACCOUNT_ID, Community_Cnt, Log_Community_Cnt, Connexion_Cnt, Virtual_Cnt, Log_Virtual_Cnt) %>%
+  arrange(ACCOUNT_ID)
+head(Engagement)
+dim(Engagement)
+```
+
+
+## Visualize the final table. 
+```{r}
+hist(Engagement$Log_Community_Cnt)
+hist(Engagement$Log_Virtual_Cnt)
+hist(Engagement$Connexion_Cnt)
+```
+
+
+## Save table as csv file.
+```{r}
+write.csv(Engagement, "C:/Users/xlang/Downloads/Data/From RStudio/Engagement(comm,conn,virt).csv", row.names=FALSE)
+```
+
+
+
+#################### Espalier ####################
+Note: Espalier from Sophie's file was the final version.
+
+## Pull Espalier_customer_journey table from Snowflake.
+```{r}
+espalier_customer_journey <- dbGetQuery(con,"select * from espalier_customer_journey")
+```
+
+## Prepare table.
+```{r}
+head(espalier_customer_journey)
+dim(espalier_customer_journey)
+Espalier <- espalier_customer_journey %>%
+  filter(SCORES_IS_LATEST_FLAG == TRUE) %>%
+  filter(ACCOUNT_ID %in% account_id_list) %>%
+  select(ACCOUNT_ID, CUSTOMER_JOURNEY_WEIGHTED_SCORE, SERVES_SMALL_BUSINESS, SERVES_MIDSIZE_BUSINESS, SERVES_LARGE_BUSINESS) %>%
+  mutate(across(everything(), ~ replace_na(.x, FALSE))) %>%
+  arrange(ACCOUNT_ID)
+head(Espalier)  
+dim(Espalier)
+```
+
+
+## Visualize table.
+```{r}
+hist(Espalier$CUSTOMER_JOURNEY_WEIGHTED_SCORE)
+barplot(table(Espalier$SERVES_SMALL_BUSINESS), main="SERVES_SMALL_BUSINESS")
+barplot(table(Espalier$SERVES_MIDSIZE_BUSINESS), main="SERVES_MIDSIZE_BUSINESS")
+barplot(table(Espalier$SERVES_LARGE_BUSINESS), main="SERVES_LARGE_BUSINESS")
+```
+
+
+## Save table as csv file.
+```{r}
+write.csv(Espalier, "C:/Users/xlang/Downloads/Data/From RStudio/Espalier.csv", row.names=FALSE)
+```
+
+
+
+#################### Surveys ####################
+
+## Pull Surveys table from Snowflake.
+```{r}
+surveys <- dbGetQuery(con,"select * from surveys")
+```
+
+
+## Prepare table.
+```{r}
+head(surveys)
+dim(surveys)
+Surveys <- surveys %>%
+  filter(ACCOUNT_ID %in% account_id_list) %>%
+  group_by(ACCOUNT_ID) %>%
+  filter(SURVEY_CREATED_AT_DATE == max(SURVEY_CREATED_AT_DATE)) %>%
+  mutate(NPS_GROUP_SCORE = case_when(NPS_GROUP == "promoter" ~ 1,
+                                     NPS_GROUP == "passive" ~ 0,
+                                     NPS_GROUP == "detractor" ~ -1)) %>%
+  arrange(ACCOUNT_ID)
+head(Surveys)  
+dim(Surveys)
+```
+
+
+## Save table as csv file.
+```{r}
+write.csv(Surveys, "C:/Users/xlang/Downloads/Data/From RStudio/Surveys.csv", row.names=FALSE)
+```
+

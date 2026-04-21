@@ -1,0 +1,551 @@
+---
+title: "Pipeline1&3 - feature selection, clustering & optimal models for Shiny"
+author: "Team Connected Insights - Xufei Lang"
+date: "2026-03-03"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Load packages. 
+```{r, message=FALSE}
+library(dplyr)
+library(caret)
+library(glmnet)
+library(mgcv)
+library(ppsr)
+library(randomForest)
+library(lightgbm)
+library(e1071)
+library(stats)
+library(ggplot2)
+library(fastshap)
+library(forcats)
+library(cluster)
+library(stringr)
+library(gbm)
+```
+
+
+## Final target datasets location.   
+Please use the datasets located in our team's deliverable:    
+"Team Connected Insights/data/final/"  
+There are 3 files:   
+- 1st target (GigaSpire) is "final_target.csv"  
+- 2nd target (CSC) is "final_target_CSC_giga.csv"  
+- 3rd target (Engagement Cloud) is "final_target_CEA_rate_upd.csv"  
+
+
+## Load in cleaned dataset final_target.csv.  
+Need minimum modification if using other files.   
+```{r}
+# Load in data
+df<-read.csv("C:/Users/xlang/Downloads/Deliverables/Team Connected Insights/data/final/final_target.csv",header=TRUE)  # Change to your data path.
+# Remove irrelevant columns; remove X if exists.  
+df <- df %>% dplyr::select(-dplyr::any_of(c("X", "ACCOUNT_ID")))  # ACCOUNT_ID will be added back for Shiny UI.
+str(df)
+```
+
+
+## Manually input.    
+Please change the target name:   
+- 1st target: "growth_rate"  
+- 2nd target: "growth_rate_CSC"  
+- 3rd target："engagement_adoption_rate"  
+```{r}
+# Type in your target column name.
+target <- "growth_rate"
+```
+
+
+## Data Preparation.  
+Make necessary changes here. Do not change dataframe name (df).  
+```{r}
+# Convert Character and binary columns to factor. 
+df <- df %>% 
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(ACCOUNT_SUCCESS_LEADER = factor(ACCOUNT_SUCCESS_LEADER)) %>%
+  mutate(COMPETITOR_AS_PRIMARY_VENDOR = factor(COMPETITOR_AS_PRIMARY_VENDOR))
+
+# Replace spaces or special characters in factor levels.
+df$BUSINESS_TYPE_PRIMARY <- factor(gsub("[^A-Za-z0-9]", "_", df$BUSINESS_TYPE_PRIMARY))
+df$REGION <- factor(gsub("[^A-Za-z0-9]", "_", df$REGION))
+
+# Merge parts of BUSINESS_TYPE_PRIMARY, REGION levels
+#sort(prop.table(table(df$REGION)),decreasing=TRUE)  # check levels, keep n=10
+#sort(prop.table(table(df$BUSINESS_TYPE_PRIMARY)),decreasing=TRUE)  # keep n=8
+df <- df %>% mutate(
+    REGION = fct_lump_n(REGION, n=10, other_level="Other"), # keep top 10
+    BUSINESS_TYPE_PRIMARY = fct_lump_n(BUSINESS_TYPE_PRIMARY, n=8, other_level="Other") # keep top 8
+)
+str(df)
+```
+
+
+The following code in Pipeline1 section should be able to run without any further modification.  
+
+
+## Feature importance ranking function (Try not to change this part)  
+Apply Consensus ranking approach to average feature ranks for PPS,RF,LightGBM and Elastic Net to get final feature ranks. 
+```{r}
+rank_features <- function(df, response) {
+
+  # Prepare formula and target
+  formula <- as.formula(paste(response, "~."))
+  y <- df[[response]]
+  
+  # Predictive Power Score:
+  # Captures non-linear and asymmetric predictive relationships.
+  pps_df <- ppsr::score_predictors(df, y=response)
+  pps_imp_df <- data.frame(Feature=pps_df$x, PPS=pps_df$pps)
+  
+  # Random Forest:
+  # Captures non-linear relationships and interactions.
+  set.seed(1234)
+  rf <- randomForest(formula, df, importance=TRUE)
+  rf_imp <- importance(rf, type=1)
+  rf_imp_df <- data.frame(Feature=rownames(rf_imp), RF=rf_imp[,1])
+
+  # LightGBM:
+  # Captures non-linear patterns, interactions and boosted relationships. 
+  set.seed(1234)
+  x <- model.matrix(formula,df)[,-1]
+  lgb <- lightgbm(data=x, label=y, nrounds=200, verbose=-1)
+  lgb_imp <- lgb.importance(lgb)
+  lgb_imp_df <- data.frame(Feature=lgb_imp$Feature, LGB=lgb_imp$Gain)
+  
+  # Elastic Net:
+  # Captures linear relationships and collinearity structure. 
+  set.seed(1234)
+  enet <- cv.glmnet(x,y,alpha=0.5,standardize=TRUE)
+  coef_enet <- coef(enet, s="lambda.min")
+  enet_imp_df <- data.frame(Feature=rownames(coef_enet), ENet=as.numeric(abs(coef_enet[,1])))
+  enet_imp_df <- enet_imp_df[enet_imp_df$Feature != "(Intercept)",, drop=FALSE]
+  if (nrow(enet_imp_df)==0) {
+    enet_imp_df <- data.frame(Feature=colnames(x), ENet=0)
+  }
+  
+  
+  # Merge all importance measures.
+  importance <- merge(pps_imp_df, rf_imp_df, by="Feature", all=TRUE)
+  importance <- merge(importance, lgb_imp_df, by="Feature", all=TRUE)
+  importance <- merge(importance, enet_imp_df, by="Feature", all=TRUE)
+  # Replace NAs with 0.
+  importance[is.na(importance)] <- 0
+  
+  # Consensus Ranking: convert each method to rank then average.
+  importance$Total <- rowMeans(cbind(rank(-importance$PPS, ties.method="average"),
+                                     rank(-importance$RF, ties.method="average"),
+                                     rank(-importance$LGB, ties.method="average"),
+                                     rank(-importance$ENet, ties.method="average")))
+  # Sort by Consensus Ranking (smallest rank = top feature).
+  importance <- importance[order(importance$Total),]
+  # Remove response if accidentally included (safety check)
+  importance <- importance[importance$Feature != response, ]
+  
+  # If feature is dummy, change back to original feature. 
+  importance <- importance %>%
+    mutate(across(everything(), ~ ifelse(str_starts(., fixed("REGION")), "REGION", .))) %>%
+    mutate(across(everything(), ~ ifelse(str_starts(., fixed("SERVICE_TIER")), "SERVICE_TIER", .))) %>%
+    mutate(across(everything(), ~ ifelse(str_starts(., fixed("BUSINESS_TYPE_PRIMARY")), "BUSINESS_TYPE_PRIMARY", .)))
+  
+  return(importance)
+}
+```
+
+
+## Get Top features from full dataset for desired target.  
+```{r}
+# Rank features for full dataset. 
+importance_df <- rank_features(df, response=target)
+top10 <- importance_df[which(!duplicated(importance_df$Feature))[1:10], c("Feature")]
+top10  # use top10 as starting point for clustering.
+```
+
+
+## Clustering function (Try not to change this part)   
+Loop function for Gower+PAM Clustering to find the best topN features and the best number of clusters with the highest ASW value.
+```{r}
+clustering_func <- function(df, top10, k_grid=2:10, topN_max=10) {
+  stopifnot(is.data.frame(df))
+  stopifnot(is.numeric(k_grid) && all(k_grid >= 2))
+
+  set.seed(1234)
+
+  # Clean top feature list
+  top_features <- top10[!is.na(top10)]
+  if (length(top_features) < 2) {
+    stop("Need at least 2 non-NA features.")
+  }
+
+  topN_max <- min(topN_max, length(top_features), 10)
+  topN_grid <- 2:topN_max
+
+  # Initialize ASW results (rows = k, cols = topN)
+  ASW_rank <- matrix(NA_real_, nrow = length(k_grid), ncol = length(topN_grid))
+  rownames(ASW_rank) <- paste0("k=", k_grid)
+  colnames(ASW_rank) <- paste0("top", topN_grid)
+
+  # Map k to row index
+  k_row_index <- setNames(seq_along(k_grid), as.character(k_grid))
+
+  # Loop through topN and k
+  for (j in seq_along(topN_grid)) {
+    topN <- topN_grid[j]
+    selected_features <- top_features[seq_len(topN)]
+
+    df_sub <- df %>% dplyr::select(dplyr::all_of(selected_features))
+    gower_dist <- cluster::daisy(df_sub, metric = "gower")
+
+    for (k in k_grid) {
+      pam_result <- cluster::pam(gower_dist, diss = TRUE, k = k)
+      ASW_rank[k_row_index[as.character(k)], j] <- pam_result$silinfo$avg.width
+    }
+  }
+
+  # Identify best (k, topN)
+  best_idx <- arrayInd(which.max(ASW_rank), dim(ASW_rank))
+  best_k   <- k_grid[best_idx[1]]
+  best_topN <- topN_grid[best_idx[2]]
+  best_features <- top_features[seq_len(best_topN)]
+
+  # Final PAM
+  df_best <- df %>% dplyr::select(dplyr::all_of(best_features))
+  gower_best <- cluster::daisy(df_best, metric = "gower")
+  final_pam <- cluster::pam(gower_best, diss = TRUE, k = best_k)
+
+  medoids <- df_best[final_pam$medoids, , drop = FALSE]
+
+  df_final <- df %>% dplyr::mutate(Cluster = as.factor(final_pam$clustering))
+
+  # Print only the info you care about
+  cat("Best number of clusters:", best_k, "\n")
+  cat("Best top features:", paste(best_features, collapse = ", "), "\n\n")
+
+  # Return ONLY essential outputs
+  list(
+    final_pam        = final_pam,
+    df_final         = df_final,
+    cluster_feature = best_features,
+    medoid_profiles  = medoids, 
+    ASW_rank         = ASW_rank   # keep for diagnostics
+  )
+}
+```
+
+
+# Get clustering results.  
+```{r}
+cluster_result <- clustering_func(df=df,top10=top10)
+# cluster_result$ASW_rank  # Un-comment to check full results.
+df2 <- cluster_result$df_final
+# Convert binary columns back to integer for predictive model. 
+df2$ACCOUNT_SUCCESS_LEADER <- as.integer(df2$ACCOUNT_SUCCESS_LEADER)-1L
+df2$COMPETITOR_AS_PRIMARY_VENDOR <- as.integer(df2$COMPETITOR_AS_PRIMARY_VENDOR)-1L  
+str(df2) #1110*21  # Added a new "Cluster" column for further analysis.
+```
+
+
+## Save dataset with Cluster label.  
+Note: if you want to check the models comparison for full dataset and segment-level dataset among all predictive models, please save this table and load it into the "Pipeline2 - Predictive models comparison.Rmd", which will do a full list of model tuning and comparison. 
+```{r}
+# Save the csv file. 
+write.csv(df2, "./df_cluster.csv")  # Replace the name as needed.
+```
+
+
+**Please go to Pipeline2, and come back after running Pipeline2.**   
+
+
+================================================================================   
+**Pipeline3**:   
+The following code will be recording **results from pipeline2** for multiple targets: clusters, Top N features, Best predictive models with optimal parameters.    
+These results will be saved as a Pam bundle and used in R Shiny UI application.  
+================================================================================   
+
+
+################## 1st target - "growth_rate" (of GigaSpire) ###################  
+
+Top 7 predictive features for Cluster 1:   
+  "PENETRATION_RATE" "Log_Community_Cnt" "GIGA_PURCHASED_AMOUNT_log" "customer_age"   "OF_ACTIVE_CONTACTS" "Log_Virtual_Cnt" "REGION"     
+
+Top 6 predictive features for Cluster 2:   
+  "Log_Community_Cnt" "customer_age" "PENETRATION_RATE" "OF_ACTIVE_CONTACTS" "CUSTOMER_JOURNEY_WEIGHTED_SCORE" "GIGA_PURCHASED_AMOUNT_log"   
+
+
+## Record Top features results here (manually input).  
+```{r}
+# Record results from Pipeline2.
+topN_c1_1st <- c("PENETRATION_RATE",
+                 "Log_Community_Cnt",
+                 "GIGA_PURCHASED_AMOUNT_log",
+                 "customer_age",
+                 "OF_ACTIVE_CONTACTS",
+                 "Log_Virtual_Cnt",
+                 "REGION")
+topN_c2_1st <- c("Log_Community_Cnt",
+                 "customer_age",
+                 "PENETRATION_RATE",
+                 "OF_ACTIVE_CONTACTS",
+                 "CUSTOMER_JOURNEY_WEIGHTED_SCORE",
+                 "GIGA_PURCHASED_AMOUNT_log")
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# topN_cX_1st <- c()
+```
+
+
+Make sure you've loaded "final_target.csv" in Pipeline1.  
+```{r, warning=FALSE}
+# Prepare data at segment-level. (No need to change this part)
+df_c1_topN_1st <- df2 %>%
+  filter(Cluster==1) %>%
+  dplyr::select(target, all_of(topN_c1_1st))
+df_c2_topN_1st <- df2 %>%
+  filter(Cluster==2) %>%
+  dplyr::select(target, all_of(topN_c2_1st))
+
+# If you have more than 2 clusters, replace X with your cluster number.
+# df_cX_topN_1st <- df2 %>%
+#   filter(Cluster==X) %>%
+#   dplyr::select(target, all_of(topN_cX_1st))
+```
+
+
+Optimal models (from Pipeline2):   
+
+For Cluster 1 is Random Forest (mtry=2, ntree=800) with top 7 features, RMSE=1.2492, R-squared=0.2916;   
+For Cluster 2 is Gradient Boosting (n.trees=100, interaction.depth=5, shrinkage=0.01, n.minobsinnode=10) with top 6 features, RMSE=3.6785, R-squared=0.0227.   
+
+
+## Build optimal predictive models for 1st target - Growth Rate of Router (GigaSpire) Deployment in 3 Months.    
+**Manually input**, input the best models and optimal parameters resulting from Pipeline2 (Note: use a regular one, not caret::train type in Pipeline2).   
+These models will be used in R Shiny UI app to make prediction.   
+```{r}
+# 1st target, Cluster 1, RF, top7 features.
+# Change the model as needed, but don't change "model_c1_topN_1st".
+set.seed(1234)
+model_c1_topN_1st <- randomForest(as.formula(paste(target, "~.")),
+                                  data=df_c1_topN_1st,
+                                  mtry=2,
+                                  ntree=800)
+
+# 1st target, Cluster 2, GBM, top6 features.
+# Change the model as needed, but don't change "model_c2_topN_1st".
+set.seed(1234)
+model_c2_topN_1st <- gbm(as.formula(paste(target, "~.")),
+                         data=df_c2_topN_1st,
+                         distribution="gaussian",
+                         n.trees=100,
+                         interaction.depth=5,
+                         shrinkage=0.01,
+                         n.minobsinnode=10,
+                         verbose=FALSE)
+
+# Add your best model with optimal parameter for other clusters (results from Pipeline2).
+```
+
+
+## Save medoids, Top features and best models to use in R Shiny.   
+Our predictive model comparison and the selection of the optimal model are conditioned on the original cluster labels. If Shiny refits and flips label IDs (e.g., swaps cluster 1 and cluster 2), then any model performance metrics or decisions tied to those labels will be misaligned and potentially incorrect. By saving and reusing the original medoids, we ensure the cluster numbering stays fixed, so downstream model comparisons and the chosen ‘best’ model remain valid. 
+```{r}
+# Save medoids, Top features and best models for Shiny.
+pam_bundle_1st <- list(final_pam=cluster_result$final_pam,
+                       medoid_profiles=cluster_result$medoid_profiles,
+                       cluster_feature=cluster_result$cluster_feature,
+                       topN_c1=topN_c1_1st,
+                       topN_c2=topN_c2_1st,
+                       model_c1=model_c1_topN_1st,
+                       model_c2=model_c2_topN_1st,
+                       model_c2_gbm_n_trees=100,  # Use the n.trees in your gbm model.
+                       target_name=target)
+# If you don't use gbm, remove "," and "model_c2_gbm_n_trees=100".
+saveRDS(pam_bundle_1st, "./pam_bundle_1st.rds")  # Replace _1st as needed.
+```
+
+
+################## 2nd target - "growth_rate_CSC" ##############################   
+
+
+## Record Top features results here (manually input).
+```{r}
+# # Record results from Pipeline2.
+# topN_c1_2nd <- c("GIGA_PURCHASED_AMOUNT_log",
+#                  "GATEWAY_30_DAYS_COUNT_log",
+#                  "PENETRATION_RATE_CSC",
+#                  "customer_age",
+#                  "OF_ACTIVE_CONTACTS",
+#                  "Log_Virtual_Cnt")
+# topN_c2_2nd <- c("GIGA_PURCHASED_AMOUNT_log",
+#                  "Log_Community_Cnt",
+#                  "N_UNIQUE_ZIP_log",
+#                  "GATEWAY_30_DAYS_COUNT_log",
+#                  "Log_Virtual_Cnt")
+# 
+# # If you have more than 2 clusters, replace X with your cluster number.
+# # topN_cX_2nd <- c()
+```
+
+
+Make sure you've loaded "final_target_CSC_giga.csv" in Pipeline1.  
+```{r, warning=FALSE}
+# # Prepare data at segment-level. (No need to change this part)
+# df_c1_topN_2nd <- df2 %>%
+#   filter(Cluster==1) %>%
+#   dplyr::select(target, all_of(topN_c1_2nd))
+# df_c2_topN_2nd <- df2 %>%
+#   filter(Cluster==2) %>%
+#   dplyr::select(target, all_of(topN_c2_2nd))
+# 
+# # If you have more than 2 clusters, replace X with your cluster number.
+# # df_cX_topN_2nd <- df2 %>%
+# #   filter(Cluster==X) %>%
+# #   dplyr::select(target, all_of(topN_cX_2nd))
+```
+
+
+Optimal model (from Pipeline2):   
+
+For Cluster 1 is Gradient Boosting (n.trees=100, interaction.depth=5, shrinkage=0.01, n.minobsinnode=10) with Top 6 features, RMSE=0.8053, R-squared=0.0834.    
+For Cluster 2 is Gradient Boosting (n.trees=100, interaction.depth=5, shrinkage=0.01, n.minobsinnode=10) with Top 5 features, RMSE=4.3453, R-squared=0.0327.   
+
+
+## Build optimal predictive models for 2nd target - Growth Rate of CSC SUBSCRIBER COUNT in 3 Month.   
+**Manually input**, input the best models and optimal parameters resulting from Pipeline2 (Note: use a regular one, not caret::train type in Pipeline2).   
+```{r}
+# # 2nd target, Cluster 1, GBM, top5 features
+# # Change the model as needed, but don't change "model_c1_topN_2nd".
+# set.seed(1234)
+# model_c1_topN_2nd <- gbm(as.formula(paste(target, "~.")),
+#                          data=df_c1_topN_2nd,
+#                          distribution="gaussian",
+#                          n.trees=100,
+#                          interaction.depth=5,
+#                          shrinkage=0.01,
+#                          n.minobsinnode=10,
+#                          verbose=FALSE)
+# 
+# # 2nd target, Cluster 2, GBM, top5 features.
+# # Change the model as needed, but don't change "model_c2_topN_2nd".
+# set.seed(1234)
+# model_c2_topN_2nd <- gbm(as.formula(paste(target, "~.")),
+#                          data=df_c2_topN_2nd,
+#                          distribution="gaussian",
+#                          n.trees=100,
+#                          interaction.depth=5,
+#                          shrinkage=0.01,
+#                          n.minobsinnode=10,
+#                          verbose=FALSE)
+# 
+# # Add your best model with optimal parameter for other clusters (results from Pipeline2).
+```
+
+
+## Save medoids, Top features and best models to use in R Shiny.  
+```{r}
+# # Save medoids, Top features and best models for Shiny.
+# pam_bundle_2nd <- list(final_pam=cluster_result$final_pam,
+#                        medoid_profiles=cluster_result$medoid_profiles,
+#                        cluster_feature=cluster_result$cluster_feature,
+#                        topN_c1=topN_c1_2nd,
+#                        topN_c2=topN_c2_2nd,
+#                        model_c1=model_c1_topN_2nd,
+#                        model_c1_gbm_n_trees=100,  # Only for gbm
+#                        model_c2=model_c2_topN_2nd,
+#                        model_c2_gbm_n_trees=100,  # Only for gbm
+#                        target_name=target)
+# # If you don't use gbm, remove "," and "model_c2_gbm_n_trees=100".
+# saveRDS(pam_bundle_2nd, "./pam_bundle_2nd.rds")
+```
+
+
+################## 3rd target - engagement_adoption_rate     ###################
+Note: final 3rd target name: "**engagement cloud intensity**".    
+The rendered HTML file still used the old name, but final report, presentation and README files will use this final name.   
+
+
+## Record Top features results here (manually input).
+```{r}
+# # Record results from Pipeline2.
+# topN_c1_3rd <- c("PENETRATION_RATE",
+#                  "GIGA_PURCHASED_AMOUNT_log",
+#                  "customer_age",
+#                  "TOTAL_BROADBAND_SUBS_SALES_INPUT",
+#                  "OF_ACTIVE_CONTACTS",
+#                  "Log_Community_Cnt",
+#                  "Log_Virtual_Cnt")
+# topN_c2_3rd <- c("PENETRATION_RATE",
+#                  "TOTAL_BROADBAND_SUBS_SALES_INPUT",
+#                  "N_COMPETITORS",
+#                  "OF_ACTIVE_CONTACTS")
+# 
+# # If you have more than 2 clusters, replace X with your cluster number.
+# # topN_cX_3rd <- c()
+```
+
+
+Make sure you've loaded "final_target_CEA_rate_upd.csv" in Pipeline1.  
+```{r, warning=FALSE}
+# # Prepare data at segment-level. (No need to change this part)
+# df_c1_topN_3rd <- df2 %>%
+#   filter(Cluster==1) %>%
+#   dplyr::select(target, all_of(topN_c1_3rd))
+# df_c2_topN_3rd <- df2 %>%
+#   filter(Cluster==2) %>%
+#   dplyr::select(target, all_of(topN_c2_3rd))
+# 
+# # If you have more than 2 clusters, replace X with your cluster number.
+# # df_cX_topN_3rd <- df2 %>%
+# #   filter(Cluster==X) %>%
+# #   dplyr::select(target, all_of(topN_cX_3rd))
+```
+
+
+Optimal model (from Pipeline2):   
+
+For Cluster 1 is Random Forest (mtry=4, ntree=800) with Top 7 features, RMSE=0.2053, R-squared=0.2416.  
+For Cluster 2 is Random Forest (mtry=4, ntree=500) with Top 4 features, RMSE=0.4664, R-squared=0.7296.  
+
+
+## Build optimal predictive models for 3rd target - Growth Rate of Engagement Cloud Adoption in 3 Months.     
+**Manually input**, input the best models and optimal parameters resulting from Pipeline2 (Note: use a regular one, not caret::train type in Pipeline2). 
+```{r}
+# # 3rd target, Cluster 1, RF, top6 features
+# # Change the model as needed, but don't change "model_c1_topN_3rd".
+# set.seed(1234)
+# model_c1_topN_3rd <- randomForest(as.formula(paste(target, "~.")),
+#                                   data=df_c1_topN_3rd,
+#                                   mtry=4,
+#                                   ntree=800)
+# 
+# # 3rd target, Cluster 2, RF, top4 features.
+# # Change the model as needed, but don't change "model_c2_topN_3rd".
+# set.seed(1234)
+# model_c2_topN_3rd <- randomForest(as.formula(paste(target, "~.")),
+#                                   data=df_c2_topN_3rd,
+#                                   mtry=4,
+#                                   ntree=500)
+# 
+# # Add your best model with optimal parameter for other clusters (results from Pipeline2).
+```
+
+
+## Save medoids, Top features and best models to use in R Shiny. 
+```{r}
+# # Save medoids, Top features and best models for Shiny.
+# pam_bundle_3rd <- list(final_pam=cluster_result$final_pam,
+#                        medoid_profiles=cluster_result$medoid_profiles,
+#                        cluster_feature=cluster_result$cluster_feature,
+#                        topN_c1=topN_c1_3rd,
+#                        topN_c2=topN_c2_3rd,
+#                        model_c1=model_c1_topN_3rd,
+#                        model_c2=model_c2_topN_3rd)
+# saveRDS(pam_bundle_3rd, "./pam_bundle_3rd.rds")
+```
+
+
+
