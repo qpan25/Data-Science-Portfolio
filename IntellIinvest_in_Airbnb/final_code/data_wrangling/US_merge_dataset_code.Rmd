@@ -1,0 +1,54 @@
+---
+title: "US Dataset Preparation Code"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## US Dataset Preparation Code
+
+- This code is being written in R to merge all 10 individual cities and prepare the final merge data set for whole US market. 
+- At max from each individuall city, only 2500 records are being selected.
+- For cities like Chicago, LA, SFO as the data set contains more than 2500 records, so randomly 2500 records being selected
+- For rest cities, all the data is being considered. 
+
+```{r}
+#Setting the directory to read the data set
+setwd("/Users/pooja/Desktop/GT_College/08_MGT_6203/Group_Project/Data_Wrangling/final_filter_data_set")
+getwd()
+
+
+#Reading data sets for all trained 10 cities.
+boston_dataset <- read.csv("boston_merge.csv")
+columbus_dataset <- read.csv("columbus_merge.csv")
+dallas_dataset <- read.csv("dallas_merge.csv")
+denver_dataset <- read.csv("denver_merge.csv")
+portland_dataset <- read.csv("portland_merge.csv")
+seattle_dataset <- read.csv("seattle_merge.csv")
+chicago_dataset <- read.csv("chicago_merge.csv")
+sfo_dataset <- read.csv("sfo_merge.csv")
+la_dataset <- read.csv("la_merge.csv")
+newyork_dataset <- read.csv("newyork_merge.csv")
+
+#Randomly selecting only 2500 records for the data sets having more than
+# 2500 records
+chicago_2500 <- chicago_dataset[sample(nrow(chicago_dataset), 2500), ]
+sfo_2500 <- sfo_dataset[sample(nrow(sfo_dataset), 2500), ]
+la_2500 <- la_dataset[sample(nrow(la_dataset), 2500), ]
+newyork_2500 <- newyork_dataset[sample(nrow(newyork_dataset), 2500), ]
+
+#merging all 10 city data
+merged_dataset <- rbind(boston_dataset, columbus_dataset, dallas_dataset,
+                        denver_dataset, portland_dataset, seattle_dataset,
+                        chicago_2500, sfo_2500, la_2500, newyork_2500)
+
+#Validating the merged data set
+head(merged_dataset, 5)
+
+#Checking the total count of the merged data set
+nrow(merged_dataset)
+
+#Writing data set to a csv file
+write.csv(merged_dataset,"merge_dataset.csv", row.names = FALSE)
+```
+

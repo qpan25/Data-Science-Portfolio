@@ -1,0 +1,10 @@
+Model	Number predictors	R squared 	Adjusted R squared	AIC	RMSE by DAAG CV	RMSE on test dataset
+model1_US_linear_linear	11	0.3142	0.3137	201603.5	181	226.165
+model2_US_linear_linear	7	0.3134	0.3131	201613.1	181	226.26
+model3_US_log_log	11	0.5129	0.5126	22093.42	0.501	0.505
+model4_US_log_log	7	0.5128	0.5126	22089.03	0.5	0.505
+model5_US_log_linear	11	0.522	0.5217	22135.84	0.5	0.507
+model6_US_linear_log	11	0.2401	0.2396	201961.5	186	227.06
+lasso_cv_US_linear_linear	3	0.234	na	na	191	228
+lasso_cv_US_log_log	8	0.507	na	na	0.504	0.508
+lasso_cv_US_log_linear	10	0.516	na	na	0.503	0.509

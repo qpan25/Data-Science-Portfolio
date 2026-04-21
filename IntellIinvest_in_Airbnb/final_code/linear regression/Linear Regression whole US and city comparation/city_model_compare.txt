@@ -1,0 +1,11 @@
+Model	R squared 	Adjusted R squared	AIC
+Boston_log_linear_model	0.623	0.62	1990
+chicago_log_linear_model	0.594	0.593	5553
+newyork_log_linear_model	0.494	0.494	24017
+la_log_linear_model	0.629	0.629	21751
+dallas_log_linear_model	0.698	0.696	2145
+columbus_log_linear_model	0.671	0.667	733
+portland_log_linear_model	0.517	0.515	2167
+sfo_log_linear_model	0.547	0.546	4647
+denver_log_linear_model	0.529	0.527	3237
+seattle_log_linear_model	0.615	0.613	2377

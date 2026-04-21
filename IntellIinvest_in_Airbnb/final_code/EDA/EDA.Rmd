@@ -1,0 +1,247 @@
+---
+title: "EDA"
+output:
+  html_document:
+    df_print: paged
+    toc: TRUE
+    toc_float: TRUE
+---
+# Data Inputs and Preparation
+
+## Setting up libraries
+```{r  message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggcorrplot)
+library(ggpubr)
+```
+
+## Reading dataset samples
+
+```{r}
+dallas<-read.csv('dallas_merge.csv',header = T)
+boston<-read.csv('boston_merge.csv',header = T)
+denver<-read.csv('denver_merge.csv',header = T)
+
+all <- read.csv('merge_dataset.csv', header = T)
+```
+
+We are performing EDA on a sampling of the cities. The selected cities are Dallas, Boston, and Denver. In addition, we are reviewing the full population of city data. 
+
+```{r  message=FALSE, warning=FALSE}
+head(dallas)
+```
+
+## Data preparation for dummy variables
+
+
+```{r  message=FALSE, warning=FALSE}
+#Data cleansing for correlation matrix by creating dummy variables
+
+#DALLAS 
+dallas1<-dallas[,-c(1,2,5,6,7,8)]
+
+dallas1$superhost<-ifelse(dallas$host_is_superhost=='t',1,0)
+dallas1$private_room<-ifelse(dallas$room_type=='Private room',1,0)
+dallas1$shared_room<-ifelse(dallas$room_type=='Shared room',1,0)
+dallas_roomtype<-data.frame(room_type=factor(dallas$room_type))
+
+dallas1<-dallas1[,c(2,4,5,6,7,8,9,10,11,12,13,14,15)] 
+colnames(dallas1)[c(6,7,8)]<-c('min_nights','max_nights','review_scores')
+
+#BOSTON 
+boston1<-boston[,-c(1,2,5,6,7,8)]
+
+boston1$superhost<-ifelse(boston1$host_is_superhost=='t',1,0)
+boston1$private_room<-ifelse(boston1$room_type=='Private room',1,0)
+boston1$shared_room<-ifelse(boston1$room_type=='Shared room',1,0)
+boston_roomtype<-data.frame(room_type=factor(boston1$room_type))
+
+boston1<-boston1[,c(2,4,5,6,7,8,9,10,11,12,13,14,15)] 
+colnames(boston1)[c(6,7,8)]<-c('min_nights','max_nights','review_scores')
+
+#DENVER 
+denver1<-denver[,-c(1,2,5,6,7,8)]
+
+denver1$superhost<-ifelse(denver1$host_is_superhost=='t',1,0)
+denver1$private_room<-ifelse(denver1$room_type=='Private room',1,0)
+denver1$shared_room<-ifelse(denver1$room_type=='Shared room',1,0)
+denver_roomtype<-data.frame(room_type=factor(denver1$room_type))
+
+denver1<-denver1[,c(2,4,5,6,7,8,9,10,11,12,13,14,15)] 
+colnames(denver1)[c(6,7,8)]<-c('min_nights','max_nights','review_scores')
+
+#ALL
+all1<-all[,-c(1,2,5,6,7,8)]
+
+all1$superhost<-ifelse(all1$host_is_superhost=='t',1,0)
+all1$private_room<-ifelse(all1$room_type=='Private room',1,0)
+all1$shared_room<-ifelse(all1$room_type=='Shared room',1,0)
+all_roomtype<-data.frame(room_type=factor(all1$room_type))
+
+all1<-all1[,c(2,4,5,6,7,8,9,10,11,12,13,14,15)] 
+colnames(all1)[c(6,7,8)]<-c('min_nights','max_nights','review_scores')
+
+```
+
+# EDA Insights
+
+## Room type
+
+```{r}
+dallas_room_type <- ggplot(dallas, aes(x = room_type, fill=room_type)) +
+  geom_bar() + ggtitle("Dallas")+
+  xlab("Room Types") + ylab("Count")+
+  stat_count(geom = "text", colour = "black", size = 3.5,
+  aes(label = ..count..),position=position_stack(vjust=0.5))
+
+
+boston_room_type <- ggplot(boston, aes(x = room_type, fill=room_type)) +
+  geom_bar() + ggtitle("Boston")+
+  xlab("Room Types") + ylab("Count")+
+  stat_count(geom = "text", colour = "black", size = 3.5,
+  aes(label = ..count..),position=position_stack(vjust=0.5))
+
+denver_room_type <- ggplot(denver, aes(x = room_type, fill=room_type)) +
+  geom_bar() +ggtitle("Denver")+
+  xlab("Room Types") + ylab("Count")+
+  stat_count(geom = "text", colour = "black", size = 3.5,
+  aes(label = ..count..),position=position_stack(vjust=0.5))
+
+all_room_type <- ggplot(all, aes(x = room_type, fill=room_type)) +
+  geom_bar()+ggtitle("All Cities")+
+  xlab("Room Types") + ylab("Count")+
+  stat_count(geom = "text", colour = "black", size = 3.5,
+  aes(label = ..count..),position=position_stack(vjust=0.5))
+
+room_type_arrange <- ggarrange(dallas_room_type+ rremove("x.text"), boston_room_type+ rremove("x.text"), denver_room_type+ rremove("x.text"), all_room_type + rremove("x.text")  
+          , ncol = 2, nrow = 2, common.legend = TRUE)
+
+annotate_figure(room_type_arrange, top = text_grob("Room Type Analysis", 
+               color = "Black", face = "bold", size = 14))
+
+
+```
+
+Looking at the room_types, we are able to infer what types of property owners the hosts are. We would expect the listings that are private rooms or shared rooms to be from homeowners renting out spare rooms while entire home/apt is more likely to be real estate investors trying to generate more profit. It seems like some cities, such as Boston, are more accommodating to homeowners. However, the majority of Airbnb hosts are by far real estate investors. This suggests that this is a prime opportunity to investigate real estate purchases for short-term rentals.  
+
+
+## Correlation Plot Analysis
+
+```{r  message=FALSE, warning=FALSE,echo=FALSE,fig.width=12,fig.height=12}
+dallas_correlation <- ggcorrplot(cor(dallas1),hc.order = F, type = "lower",lab=TRUE,
+           colors = c("#6D9EC1", "white", "#E46726"))+ ggtitle("Dallas")
+
+boston_correlation <- ggcorrplot(cor(boston1),hc.order = F, type = "lower",lab=TRUE,
+           colors = c("#6D9EC1", "white", "#E46726"))+ ggtitle("Boston")
+
+denver_correlation <- ggcorrplot(cor(denver1),hc.order = F, type = "lower",lab=TRUE,
+           colors = c("#6D9EC1", "white", "#E46726"))+ ggtitle("Denver")
+
+all_correlation <- ggcorrplot(cor(all1),hc.order = F, type = "lower",lab=TRUE,
+           colors = c("#6D9EC1", "white", "#E46726"))+ ggtitle("All Cities")
+
+correlation_arrange <- ggarrange(dallas_correlation, boston_correlation, denver_correlation, all_correlation
+          , ncol = 2, nrow =2, common.legend = TRUE)
+annotate_figure(correlation_arrange, top = text_grob("Correlation Matrix", 
+               color = "Black", face = "bold", size = 14))
+
+
+correlation_all_arrange <- ggarrange( all_correlation 
+          , ncol = 1, nrow = 1, common.legend = TRUE)
+annotate_figure(correlation_all_arrange, top = text_grob("Correlation Matrix using All Cities Data", 
+               color = "Black", face = "bold", size = 14))
+
+```
+
+The correlation matrices provide similar results between the cities, so this analysis will focus on the All Cities matrix.
+
+Most of the high correlations seem reasonable. We would expect the more bedrooms that an Airbnb has would translate to being able to accommodate multiple bedrooms. Each room may have multiple beds to allow more people to stay in the property. Similarly, the more people that a property could house seems to translate into higher prices for the listing. One interesting thing to note is the very high correlation between the number of bathrooms with the price. This seems in line with a ratio of the number of bedrooms to the number of bathrooms that a property usually has, so it could be a variable that may cause some multicolinearity. The price of the listing also correlates with the income, which logically makes sense. There's likely a threshold as too when a listing is priced too high and would in turn reduce the number of people that would book the property. 
+
+Most of the negative correlations are related to private_rooms and are in line with expectations. We would expect that listing a single room would hold less people and be associated with lower prices, resulting in less income.
+
+
+## Accomodates versus price
+
+```{r}
+dallas_accomodates_vs_price <- ggplot(dallas, aes(x=accommodates, y=price)) +
+  geom_point(size=2)+ 
+  ggtitle("Dallas")+
+  xlab("Number of people that listing accommodates") + ylab("Listing price")+
+  geom_smooth(method=lm)
+
+
+boston_accomodates_vs_price <-ggplot(boston, aes(x=accommodates, y=price)) +
+  geom_point(size=2)+ 
+  ggtitle("Boston")+
+  xlab("Number of people that listing accommodates") + ylab("Listing price")+
+  geom_smooth(method=lm)
+
+
+denver_accomodates_vs_price <-ggplot(denver, aes(x=accommodates, y=price)) +
+  geom_point(size=2)+ 
+  ggtitle("Denver")+
+  xlab("Number of people that listing accommodates") + ylab("Listing price")+
+  geom_smooth(method=lm)
+
+
+all_accomodates_vs_price <- ggplot(all, aes(x=accommodates, y=price)) +
+  geom_point(size=2)+ 
+  ggtitle("All Cities")+
+  xlab("Number of people that listing accommodates") + ylab("Listing price")+
+  geom_smooth(method=lm)
+
+accomodates_vs_price_arrange <- ggarrange(dallas_accomodates_vs_price+ rremove("x.text"), boston_accomodates_vs_price+ rremove("x.text"), denver_accomodates_vs_price+ rremove("x.text"), all_accomodates_vs_price + rremove("x.text")  
+          , ncol = 2, nrow = 2, common.legend = TRUE)
+annotate_figure(accomodates_vs_price_arrange, top = text_grob("Comparison of Accomodates and Listing Price using All Cities Data", 
+               color = "Black", face = "bold", size = 14))
+
+
+accomodates_vs_price_all_arrange <- ggarrange(all_accomodates_vs_price  
+          , ncol = 1, nrow = 1, common.legend = TRUE)
+annotate_figure(accomodates_vs_price_all_arrange, top = text_grob("Comparison of Accomodates and Listing Price using All Cities Data", 
+               color = "Black", face = "bold", size = 14))
+
+
+```
+
+Overall, it looks like there is increasing trend where the number of people that a listing accommodates leads to a higher listing price. Again, we see some significant outliers in terms of listing pricing where some listings are more than triple the price of similarly sized listing. This would be an interesting to explore that differentiates these types of properties whether they are in a more desirable locations or with better amenities. 
+
+## Superhost Analysis
+
+```{r}
+dallas_super <- ggplot(dallas, aes(x = host_is_superhost, fill=host_is_superhost)) +
+  geom_bar() + ggtitle("Dallas")+
+  xlab("False                            True") + ylab("Count")+
+  stat_count(geom = "text", colour = "white", size = 3.5,
+  aes(label = ..count..),position=position_stack(vjust=0.5))
+
+boston_super <- ggplot(boston, aes(x = host_is_superhost, fill=host_is_superhost)) +
+  geom_bar() + ggtitle("Boston")+
+  xlab("False                            True") + ylab("Count")+
+  stat_count(geom = "text", colour = "white", size = 3.5,
+  aes(label = ..count..),position=position_stack(vjust=0.5))
+
+denver_super <- ggplot(denver, aes(x = host_is_superhost, fill=host_is_superhost)) +
+  geom_bar() + ggtitle("Denver")+
+  xlab("False                            True") + ylab("Count")+
+  stat_count(geom = "text", colour = "white", size = 3.5,
+  aes(label = ..count..),position=position_stack(vjust=0.5))
+
+
+all_super <- ggplot(all, aes(x = host_is_superhost, fill=host_is_superhost)) +
+  geom_bar() + ggtitle("All Cities")+
+  xlab("False                            True") + ylab("Count")+
+  stat_count(geom = "text", colour = "white", size = 3.5,
+  aes(label = ..count..),position=position_stack(vjust=0.5))
+
+super_arrange <- ggarrange(dallas_super+ rremove("x.text"), boston_super+ rremove("x.text"), denver_super+ rremove("x.text"), all_super + rremove("x.text")  
+          , ncol = 2, nrow = 2, common.legend = TRUE)
+annotate_figure(super_arrange, top = text_grob("Superhost Analysis", 
+               color = "Black", face = "bold", size = 14))
+
+```
+
+Superhost is a designation from Airbnb given to hosts that met their criteria: having high overall ratings, over 10+ stays, low cancellation rates, and high response rates. Airbnb advertises Superhosts as having greater visibility and earning potential, but what we see from the data is there is significant number of superhosts throughout the platform. This varies between cities, but overall a large porportion of hosts are actually superhosts.  With so many users as superhosts, the financial value of being a superhost may be diluted and may reduce any price premiums that they may previously been able to charge. 
+
+

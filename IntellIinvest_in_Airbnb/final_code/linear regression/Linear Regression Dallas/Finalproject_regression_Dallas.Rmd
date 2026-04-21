@@ -1,0 +1,659 @@
+---
+title: 'Final Project Report: Linear Regression for Single City'
+date: '2022-06-30'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+hook_output <- knitr::knit_hooks$get("output")
+knitr::knit_hooks$set(output = function(x, options) {
+  if (!is.null(n <- options$out.lines)) {
+    x <- xfun::split_lines(x)
+    if (length(x) > n) {
+      # truncate the output
+      x <- c(head(x, n), "....\n")
+    }
+    x <- paste(x, collapse = "\n")
+  }
+  hook_output(x, options)
+})
+```
+```{css echo=FALSE}
+.custom-inline {
+  color: red;
+  font-weight: 700
+}
+```
+
+## General Observation
+
+```{r  message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(kableExtra)
+library(tidyr)
+library(car)
+library(stats)
+library(caret)
+library(ggcorrplot)
+library(DAAG)
+library(knitr)
+library(glmnet)
+set.seed(73)
+dallas<-read.csv('dallas_merge.csv',header = T)
+```
+```{r  message=FALSE, warning=FALSE}
+#data description
+head(dallas)
+```
+
+### Basic Data Cleaning: 
+
+Remove variables 'x', 'id', 'property_type', 'neighborhood', 'latitude', 'longitude' and 'income' variables. Use 'price' as our dependent variable and build linear regression model by the rest of the variables.
+
+```{r  message=FALSE, warning=FALSE}
+dallas1<-dallas[,-c(1,2,5,6,7,8,18)]
+str(dallas1)
+```
+
+We need to clean 'price' and 'bathrooms_text', remove unnecessary symbols and change to the numeric type.
+
+```{r  message=FALSE, warning=FALSE}
+# clean 'price' and 'bathrooms_text' variables
+price<-dallas1$price
+price<-gsub(pattern ='\\$|,',replacement='',x=price)
+price<-as.numeric(price)
+dallas1$price<-price
+
+bathrooms<-dallas1$bathrooms_text
+bathrooms<-gsub(pattern='\\s.*','',x=bathrooms)
+bathrooms[55]<-'0.5' # Hand correct the NA data from text 'half bath'
+bathrooms[705]<-'0.5' 
+dallas1$bathrooms_text<-as.numeric(bathrooms)
+head(dallas1)
+```
+
+'Hotel room' is one of the rental type which we don't want here. After remove it, we ends up with 2184 rows.
+
+```{r  message=FALSE, warning=FALSE}
+unique(dallas1$room_type) 
+dallas1<-dallas1[!dallas1$room_type=='Hotel room',]
+nrow(dallas1) #row number deduct from 2187 to 2184
+```
+
+Create dummy variables for 'host_is_superhost', and 'room_type'. Use none superhost and Entire home/apt as the base cases.
+
+```{r  message=FALSE, warning=FALSE}
+#Create dummy variables
+dallas1$superhost<-ifelse(dallas1$host_is_superhost=='t',1,0)
+dallas1$private_room<-ifelse(dallas1$room_type=='Private room',1,0)
+dallas1$shared_room<-ifelse(dallas1$room_type=='Shared room',1,0)
+dallas1<-dallas1[,c(2,4,5,6,7,8,9,10,11,12,13,14)]
+
+colnames(dallas1)[c(3,6,7,8)]<-c('bathrooms','min_nights','max_nights','review_scores')
+head(dallas1)
+```
+```{r  message=FALSE, warning=FALSE}
+str(dallas1)
+```
+
+From the above, we can see there are 2148 observations and 12 variables in the clean data set. The scales of each column are very different. Let's visualize their distribution by density plot.
+
+
+```{r, echo=FALSE,fig.width=12}
+dallas1 %>%
+  pivot_longer(cols=host_total_listings_count:shared_room,names_to='Variable',values_to = 'value')%>%
+  ggplot(aes(x=value,group=Variable,fill=Variable))+
+  geom_density(alpha=0.4)+
+  facet_wrap(~Variable,scales='free')+
+  ggtitle('Dallas Density Plot for Important Variables')
+```
+
+From the plot, we can see other than 3 dummy variables, most of our variables' distributions are very skewed which indicates the necessity of trying log transformation on both x and y variables later for our regression models.
+
+### Log Transformation of Dataset
+
+If we want to do log transformation, we need to investigate how many zeros are in our data frame. If there is any 0, we need to add 1. But instead of adding 1 to the whole dataset, I did some investigation of the zero values. Depending on whether they make sense, I adjust different zero values by hand.
+
+```{r  message=FALSE, warning=FALSE}
+sum(dallas1[-c(10,11,12)]==0) 
+sum(dallas1$host_total_listings_count==0)
+sum(dallas1$bathroom==0)
+```
+
+* From above we can see regardless of the binary variables,there are 329 zero values
+* 327  zero values are in the 'host_total_listings_count' variable which is wrong data. Need to add 1 for these rows
+* 2 zero values are in the 'bathroom' variable, these are outliers, remove these 2 rentals
+
+```{r  message=FALSE, warning=FALSE}
+dallas_log<-dallas1
+mask<-dallas1$host_total_listings_count==0
+dallas_log$host_total_listings_count[mask]<-dallas_log$host_total_listings_count[mask]+1
+sum(dallas_log$host_total_listings_count==0) #no zero, nice!
+
+mask1<-dallas1$bathroom==0
+dallas_log<-dallas_log[!mask1,]
+sum(dallas_log[-c(10,11,12)]==0) #no zero!good!
+
+dallas_log[-c(10,11,12)] <- lapply(dallas_log[-c(10,11,12)], log)
+head(dallas_log)
+```
+
+```{r, echo=FALSE,fig.width=12}
+dallas_log %>%
+  pivot_longer(cols=host_total_listings_count:shared_room,names_to='Variable',values_to = 'value')%>%
+  ggplot(aes(x=value,group=Variable,fill=Variable))+
+  geom_density(alpha=0.4)+
+  facet_wrap(~Variable,scales='free')+
+  ggtitle('Dallas Density Plot for Important Variables (Log Transformation)')
+```
+
+We can see log transformation acts very well on Price, min_nights,host_total_listings_count, and bathrooms but not other variables.
+
+### Collinearity between Variables
+
+Before fitting the linear models, let’s take a look at the correlation between all variables, how all the predictors relate to price, and what is the correlation between these 11 predictors.
+
+```{r  message=FALSE, warning=FALSE,echo=FALSE,fig.width=12,fig.height=12}
+ggcorrplot(cor(dallas1),hc.order = F, type = "lower",lab=TRUE,
+           colors = c("#6D9EC1", "white", "#E46726"))
+```
+
+High correlation between predictors (>0.6):
+
+* for accommodates: accommodates~bathrooms, accommodates~bedrooms, accommodates~price
+* for bathrooms: bathrooms~bedrooms, bathrooms~price
+* for bedrooms: bedrooms~price
+* for review_scores: review_scores~review_scores_accuracy
+
+We can see there are many predictors highly correlated with each other. Normally when the correlation is too high, we need to eliminate one of them for preventing reinforcing certain factors’ effects on our linear regression model. When considering variable selection, the process should be statistical-oriented and much more complicated. I will use Lasso regression later. But before that, let's separate our dataset into 30% testing and 70% training and train different models with and without log transformation to compare their performance.
+
+
+### Seperate dallas1 and dallas_log into test set and training set
+
+```{r  message=FALSE, warning=FALSE}
+# Seperate dallas1 into train_dallas1 & test_dallas1
+set.seed(73)
+train_size <- floor(0.7 * nrow(dallas1))
+train_ind <- sample(seq_len(nrow(dallas1)), size = train_size)
+
+train_dallas1 <- dallas1[train_ind, ]
+test_dallas1 <- dallas1[-train_ind, ]
+
+# Seperate dallas_log into train_dallaslog &test_dallaslog 
+set.seed(73)
+train_log_size <- floor(0.7 * nrow(dallas_log))
+train_log_ind <- sample(seq_len(nrow(dallas_log)), size = train_log_size)
+
+train_dallaslog <- dallas_log[train_log_ind, ]
+test_dallaslog <- dallas_log[-train_log_ind, ]
+```
+
+### Build model1_linear_linear with all variables from train_dallas1
+
+```{r  message=FALSE, warning=FALSE}
+model1_linear_linear<-lm(price~.,data=train_dallas1)
+summary(model1_linear_linear)
+AIC(model1_linear_linear)
+```
+
+R-squared=0.539 and Adjusted R-squared=0.536, for real-world regression results, this is a pretty good start. Accommodates is not statistically significant which also again indicates its high correlation with the variable bedrooms. Variable 'superhost' is not statistically significant too which surprised me a lot! My initial hypothesis with this variable is it must be a very important feature and should be statistically significant. It is a very interesting find! Let's see after log transfer, whether its statistically significant status will change.
+
+```{r  message=FALSE, warning=FALSE}
+# Test on our test dataset
+predictions1 <- model1_linear_linear %>% predict(test_dallas1[,-5])
+RMSE(predictions1, test_dallas1$price) #Root Mean Squared Error (RMSE)
+```
+
+### Build model2_linear_linear without the variable accommodates, superhost, review_scores_accuracy, and host_total_listings_count (P value threshold=0.05)
+
+```{r  message=FALSE, warning=FALSE}
+model2_linear_linear<-lm(price~bathrooms+bedrooms+min_nights+max_nights+
+                           review_scores+private_room+shared_room,data=train_dallas1)
+summary(model2_linear_linear)
+```
+
+
+All variables including the intercept are statistically significant, but the Adjusted R-squared didn't change. Let's check its AIC and its performance on the test dataset
+
+```{r  message=FALSE, warning=FALSE}
+AIC(model2_linear_linear)
+predictions2 <- model2_linear_linear %>% predict(test_dallas1[,-5])
+RMSE(predictions2, test_dallas1$price)
+```
+
+AIC, R-squared, Adjusted R-squared and RMSE are nearly the same as our first model.
+
+### Build model3_log_log with all variables 
+
+```{r  message=FALSE, warning=FALSE}
+model3_log_log<-lm(price~.,data=train_dallaslog)
+summary(model3_log_log)
+```
+
+
+```{r  message=FALSE, warning=FALSE}
+AIC(model3_log_log)
+predictions3 <- model3_log_log %>% predict(test_dallaslog[,-5])
+RMSE(predictions3, test_dallaslog$price)
+```
+R-squared and Adjusted R-squared are higher than model1_linear_linear and model2_linear_linear. 
+Variables host_total_listings_count and min_nights are not statistically significant.
+**For AIC and RMSE we need to note after log transformation, the AIC and RMSE are not comparable with formal models since the data's magnitude has been changed.**
+
+
+### Build model4_log_log with only statistically significant variables
+
+```{r  message=FALSE, warning=FALSE}
+model4_log_log<-lm(price~accommodates+bathrooms+bedrooms+max_nights+
+                     review_scores+superhost+private_room+shared_room ,data=train_dallaslog)
+summary(model4_log_log)
+AIC(model4_log_log) 
+
+predictions4 <- model4_log_log %>% predict(test_dallaslog[,-5])
+RMSE(predictions4, test_dallaslog$price)
+```
+
+Now all variables and the intercept are statistically significant. AIC, R-squared, Adjusted R-squared and RMSE are nearly the same with model3_log_log.
+
+
+### Build model5_log_linear with all variables
+
+```{r  message=FALSE, warning=FALSE}
+#prepare our dataset for log linear model
+train_dallas1_logprice<-train_dallas1
+train_dallas1_logprice$price_log<-log(train_dallas1$price)
+train_dallas1_logprice<-train_dallas1_logprice[,-5] #take off original price 
+
+test_dallas1_logprice<-test_dallas1
+test_dallas1_logprice$price_log<-log(test_dallas1$price)
+test_dallas1_logprice<-test_dallas1_logprice[,-5]
+```
+
+```{r  message=FALSE, warning=FALSE}
+model5_log_linear<-lm(price_log~.,data=train_dallas1_logprice)
+summary(model5_log_linear)
+
+AIC(model5_log_linear)
+predictions5 <- model5_log_linear %>% predict(test_dallas1_logprice[,-12])
+RMSE(predictions5, test_dallas1_logprice$price)
+```
+
+
+Adjusted R-squared is 0.7 with the lowest AIC and RMSE. By far, this is the best model! All variables are also statistically significant! 
+
+
+### Build model6_linear_log with all variables
+
+```{r  message=FALSE, warning=FALSE}
+# prepare our dataset for linear log model
+train_dallas_linearlog<-train_dallaslog
+train_dallas_linearlog$price<-exp(train_dallas_linearlog$price)
+
+test_dallas_linearlog<-test_dallaslog
+test_dallas_linearlog$price<-exp(test_dallas_linearlog$price)
+
+model6_linear_log<-lm(price~.,data=train_dallas_linearlog)
+summary(model6_linear_log)
+```
+
+```{r  message=FALSE, warning=FALSE}
+AIC(model6_linear_log) 
+
+predictions6<-model6_linear_log%>%predict(test_dallas_linearlog[,-5])
+RMSE(predictions6,test_dallas_linearlog$price)
+```
+
+The Adjusted R-squared is the lowest. AIC and RMSE are the highest among the models (same magnitude with model1_linear_linear, model2_linear_linear). This linear log model is the worst by far!
+
+
+
+### Cross-Validation by DAAG Package for All 6 Models
+
+cv.lm function in DAAG Package prints out a long result for each folder. I hide its output here and only show the cross-validation RMSE for the training dataset which is divided into 10 folds.
+
+Take model1_linear_linear as an example:
+
+```{r  message=FALSE, warning=FALSE,results='hide',fig.keep='all'}
+cv <- cv.lm(train_dallas1,model1_linear_linear,m=10) # seperate into 10 folds
+```
+
+
+```{r  message=FALSE, warning=FALSE}
+RMSE1<-sqrt(attr(cv,'ms')) #square root of mean squared error
+RMSE1
+```
+For all of the cross-validation results for 6 models, please check the chart in the **Model's Performance Comparison** section.
+
+## Lasso Regression
+
+Let's try lasso regression on datasets: train_dallas1 (linear_linear), train_dallaslog (log_log) and train_dallas1_logprice (log_linear). I skip the linear_log model here because of its poor performance above. 
+
+Since we have several binary variables, which shouldn't be scaled. I will first scale the dataset without these binary variables and then cbind all colmuns back together. In this way, I don't need to use glmnet's build in function 'standardize'.
+
+### Lasso regression on train_dallas1 (linear_linear)
+
+```{r  message=FALSE, warning=FALSE}
+train_dallas1_scale<-scale(train_dallas1[,-c(5,10,11,12)])
+train_dallas1_scale<-cbind(train_dallas1_scale,train_dallas1[,c(5,10,11,12)])
+head(train_dallas1_scale) # scale successful!
+```
+Build Lasso regression:
+
+```{r  message=FALSE, warning=FALSE, out.lines=13}
+lasso_linear_linear<-glmnet(x=as.matrix(train_dallas1_scale[,-9]),
+                        y=as.matrix(train_dallas1_scale[,9]),
+                        alpha=1,
+                        family='gaussian',standardize = F)
+# already standardized, so we set standardize = F
+```
+
+```{r  message=FALSE, warning=FALSE, out.lines=13}
+lasso_linear_linear
+```
+
+**From left to right: the number of nonzero coefficients (Df), the percent (of null) deviance explained (%dev) and the value of (Lambda)**
+
+* alpha: alpha=1(default) is the lasso penalty, and alpha=0 is the ridge penalty.
+* nlambda=100 is the default which means glmnet tries 100 lambda values to test.
+* Range of lambda: 0~+infinity. When lambda=0, we end up with normal linear regression.
+
+```{r  message=FALSE, warning=FALSE}
+plot(lasso_linear_linear,xvar='lambda',label=T)
+```
+
+Each line represents a variable. With the increase of lambda, the penalty term becomes larger, as a result, the overall percent deviance explained decreases. The df(the number of variables) decreases and their nonzero coefficients' absolute values decrease to near 0. After that, the variable is eliminated.
+
+So we can see when the log lambda is bigger than 3.5, there is only 2 variable left whose color is green and blue (the 3rd variable=bathrooms and 4th variable=bedroom)
+
+
+### Cross-Validation for lasso_linear_linear
+
+The function glmnet returns a sequence of models for the users to choose from. Each lambda corresponds to a different model. glmnet won’t provide us with the best model. If we want one certain model, we will need to know ahead of which lambda we want. In this case, Cross-validation is perhaps the simplest and most widely used method for that task. cv.glmnet( ) is built inside the glmnet function.
+
+```{r  message=FALSE, warning=FALSE}
+set.seed(73)
+lasso_cv_linear_linear<-cv.glmnet(x=as.matrix(train_dallas1_scale[,-9]),
+                                  y=as.matrix(train_dallas1_scale[,9]),
+                                  alpha=1,family='gaussian',
+                                  nfolds =10,type.measure="mse",standardize = F)
+lasso_cv_linear_linear
+
+plot(lasso_cv_linear_linear)
+```
+
+Let's choose lambda.1se to use which is within 1 standard error from lambda.min but with the least predictors, corresponding to the right dashed line. 
+
+```{r  message=FALSE, warning=FALSE}
+lasso_cv_linear_linear$lambda.1se
+```
+
+**Final model for lasso_cv_linear_linear:** 
+
+```{r  message=FALSE, warning=FALSE}
+ coef(lasso_cv_linear_linear, s=lasso_cv_linear_linear$lambda.1se) #the best model's coef
+```
+
+We can see the output for the best Lasso linear-linear model remove 9 variables but only keep bathrooms and bedrooms! This result surprised me a bit but also fits my intuition. When thinking about what is the most important feature for price-setting for an Airbnb rental, bedrooms and bathrooms show first in our mind, right?
+
+Check lasso_cv_linear_linear’s R-squared:
+
+```{r  message=FALSE, warning=FALSE}
+predict_lasso_cv_linear_linear<-predict(lasso_cv_linear_linear,
+                          newx=as.matrix(train_dallas1_scale[,-9]),s="lambda.1se")
+SST_lasso_cv_linear_linear<-sum((train_dallas1_scale$price-mean(train_dallas1_scale$price))^2)
+R_squared_lasso_cv_linear_linear<-1-sum((train_dallas1_scale$price-predict_lasso_cv_linear_linear)^2)/SST_lasso_cv_linear_linear
+R_squared_lasso_cv_linear_linear
+```
+
+Check lasso_cv_linear_linear’s RMSE on test dataset:
+
+```{r  message=FALSE, warning=FALSE}
+test_dallas1_scale<-scale(test_dallas1[,-c(5,10,11,12)])
+test_dallas1_scale<-cbind(test_dallas1_scale,test_dallas1[,c(5,10,11,12)])
+
+predicttest_lasso_cv_linear_linear<-predict(lasso_cv_linear_linear,
+                          newx=as.matrix(test_dallas1_scale[,-9]),s="lambda.1se")
+RMSE(predicttest_lasso_cv_linear_linear,test_dallas1_scale$price)
+```
+
+RMSE for lasso_cv_linear_linear:
+
+```{r  message=FALSE, warning=FALSE}
+sqrt(lasso_cv_linear_linear$cvm[lasso_cv_linear_linear$lambda==lasso_cv_linear_linear$lambda.1se])
+```
+
+### Lasso regression on train_dallaslog (log_log)
+
+```{r  message=FALSE, warning=FALSE}
+#Scale traning dataset
+train_dallaslog_scale<-scale(train_dallaslog[,-c(5,10,11,12)])
+train_dallaslog_scale<-cbind(train_dallaslog_scale,train_dallaslog[,c(5,10,11,12)])
+head(train_dallaslog_scale)
+```
+
+Build Lasso log_log regression by cross-validation:
+
+```{r  message=FALSE, warning=FALSE, out.lines=13}
+set.seed(73)
+lasso_cv_log_log<-cv.glmnet(x=as.matrix(train_dallaslog_scale[,-9]),
+                                  y=as.matrix(train_dallaslog_scale[,9]),
+                                  alpha=1,family='gaussian',
+                                  nfolds =10,type.measure="mse",standardize = F)
+lasso_cv_log_log
+```
+
+**Note: Be careful how to interpret lasso_cv_log_log model's coeffeients: **
+
+* All variables are log transferred except the binary variables
+* After log transformation, all variables are standardized  for lasso except binary variables and price (dependent variable)
+
+```{r  message=FALSE, warning=FALSE}
+plot(lasso_cv_log_log)
+lasso_cv_log_log$lambda.1se
+```
+
+**Final model for lasso_cv_log_log:**
+
+```{r  message=FALSE, warning=FALSE}
+coef(lasso_cv_log_log, s=lasso_cv_log_log$lambda.1se)
+```
+
+We can see the output for the best Lasso log-log model, it removes min_nights and review_scores_accuracy.
+
+Check lasso_cv_log_log’s R-squared:
+
+```{r  message=FALSE, warning=FALSE}
+predict_lasso_cv_log_log<-predict(lasso_cv_log_log,
+                          newx=as.matrix(train_dallaslog_scale[,-9]),s="lambda.1se")
+SST_lasso_cv_log_log<-sum((train_dallaslog_scale$price-mean(train_dallaslog_scale$price))^2)
+R_squared_lasso_cv_log_log<-1-sum((train_dallaslog_scale$price-predict_lasso_cv_log_log)^2)/SST_lasso_cv_log_log
+R_squared_lasso_cv_log_log
+```
+
+Check lasso_cv_log_log’s RMSE on test dataset:
+
+```{r  message=FALSE, warning=FALSE}
+test_dallaslog_scale<-scale(test_dallaslog[,-c(5,10,11,12)])
+test_dallaslog_scale<-cbind(test_dallaslog_scale,test_dallaslog[,c(5,10,11,12)])
+
+predicttest_lasso_cv_log_log<-predict(lasso_cv_log_log,
+                          newx=as.matrix(test_dallaslog_scale[,-9]),s="lambda.1se")
+RMSE(predicttest_lasso_cv_log_log,test_dallaslog_scale$price)
+```
+
+RMSE for lasso_cv_log_log:
+
+```{r  message=FALSE, warning=FALSE}
+sqrt(lasso_cv_log_log$cvm[lasso_cv_log_log$lambda==lasso_cv_log_log$lambda.1se])
+```
+
+### Lasso regression on train_dallas1_logprice (log_linear)
+
+```{r  message=FALSE, warning=FALSE}
+#Scale traning dataset
+train_dallas1_logprice_scale<-scale(train_dallas1_logprice[,-c(9,10,11,12)])
+train_dallas1_logprice_scale<-cbind(train_dallas1_logprice_scale,
+                                    train_dallas1_logprice[,c(9,10,11,12)])
+```
+
+Build Lasso log_linear regression by cross-validation:
+
+```{r  message=FALSE, warning=FALSE, out.lines=13}
+lasso_cv_log_linear<-cv.glmnet(x=as.matrix(train_dallas1_logprice_scale[,-12]),
+                                  y=as.matrix(train_dallas1_logprice_scale[,12]),
+                                  alpha=1,family='gaussian',
+                                  nfolds =10,type.measure="mse",standardize = F)
+lasso_cv_log_linear
+```
+
+```{r  message=FALSE, warning=FALSE}
+plot(lasso_cv_log_linear)
+lasso_cv_log_linear$lambda.1se
+```
+
+
+**Final model for lasso_cv_log_linear:**
+
+```{r  message=FALSE, warning=FALSE}
+coef(lasso_cv_log_linear, s=lasso_cv_log_linear$lambda.1se)
+```
+
+The best Lasso log-linear model removes the review_scores_accuracy variable.
+
+Check lasso_cv_log_linear’s R-squared:
+
+```{r  message=FALSE, warning=FALSE}
+predict_lasso_cv_log_linear<-predict(lasso_cv_log_linear,
+                          newx=as.matrix(train_dallas1_logprice_scale[,-12]),s="lambda.1se")
+SST_lasso_cv_log_linear<-sum((train_dallas1_logprice_scale$price_log-mean(train_dallas1_logprice_scale$price_log))^2)
+R_squared_lasso_cv_log_linear<-1-sum((train_dallas1_logprice_scale$price_log-predict_lasso_cv_log_linear)^2)/SST_lasso_cv_log_linear
+R_squared_lasso_cv_log_linear
+```
+
+Check lasso_cv_log_linear’s RMSE on test dataset:
+
+```{r  message=FALSE, warning=FALSE}
+test_dallas1_logprice_scale<-scale(test_dallas1_logprice[,-c(9,10,11,12)])
+test_dallas1_logprice_scale<-cbind(test_dallas1_logprice_scale,test_dallas1_logprice[,c(9,10,11,12)])
+
+predicttest_lasso_cv_log_linear<-predict(lasso_cv_log_linear,
+                          newx=as.matrix(test_dallas1_logprice_scale[,-12]),s="lambda.1se")
+RMSE(predicttest_lasso_cv_log_linear,test_dallas1_logprice_scale$price_log)
+```
+
+RMSE for lasso_cv_log_linear:
+
+```{r  message=FALSE, warning=FALSE}
+sqrt(lasso_cv_log_linear$cvm[lasso_cv_log_linear$lambda==lasso_cv_log_linear$lambda.1se])
+```
+
+### Model's Performance Comparision
+
+There are total of 9 models built. For all lasso models, because of the penalty from the coefficients, the overall performance of these models on cross-validation and the test data set is not as good as model4_log_log and model5_log_linear. Model3_log_log's performance is nearly the same as model4_log_log but with 3 more variables. So I choose to use model4_log_log. 
+
+Both model4_log_log and model5_log_linear have high R-squared, Adjusted R-squared, meanwhile with low AIC, and RMSE on both the test data set and the cross-validation on the training set. Here is the performance chart for all models:
+
+```{r,echo=F}
+final<-read.delim('9model.txt',header = TRUE)
+
+final%>% kbl() %>% kable_styling(font_size = 11,bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+### Regression Diagnostics
+
+Now we need to choose from model4_log_log and model5_log_linear. We will need to investigate if these models both meet all assumptions of linear regression which includes:
+
+* Collinearity between predictors need to be low
+* The distribution of the residuals (errors) are normal distribution with mean=0
+* All of the residuals are independent
+* Identify high leverage points
+* Variance of residuals is constant (Homoscedastic)
+
+### Check Collinearity: Variance Inflation Factor (VIF) for All Predictors
+
+**VIF check for model4_log_log's predictors: **
+
+VIF detects multicollinearity in regression analysis. It estimates how much the variance of a regression coefficient is inflated due to multicollinearity in the model.
+
+* VIF=1: not correlated.
+* 1<=VIF<=5: moderately correlated.
+* VIF>5: highly correlated.
+* Note: many resources also indicate a VIF less than 10 is also acceptable.
+
+For model4_log_log:
+
+```{r  message=FALSE, warning=FALSE}
+vif_index<-data.frame(vif(model4_log_log))
+vif_index<-tibble::rownames_to_column(vif_index,var='Predictor')
+vif_index
+```
+```{r,echo=FALSE}
+vif_index%>%ggplot(aes(x=Predictor,y=vif.model4_log_log.))+
+  geom_bar(stat="identity",position = position_dodge(),fill='darkblue', alpha=0.7,width=0.65)+
+  geom_text(aes(label=round(vif.model4_log_log.,2)),vjust=1.7,color='white')+
+  ggtitle("Variance Inflation Factor (VIF) for model4_log_log")
+```
+
+We can see the highest VIF=5.21 which is from the variable 'bedroom'. 
+
+For model5_log_linear:
+
+```{r  message=FALSE, warning=FALSE}
+vif_index<-data.frame(vif(model5_log_linear))
+vif_index<-tibble::rownames_to_column(vif_index,var='Predictor')
+vif_index
+```
+
+```{r,echo=FALSE}
+vif_index%>%ggplot(aes(x=Predictor,y=vif.model5_log_linear.))+
+  geom_bar(stat="identity",position = position_dodge(),fill='darkblue', alpha=0.7,width=0.65)+
+  geom_text(aes(label=round(vif.model5_log_linear.,2)),vjust=1.7,color='white')+
+  ggtitle("Variance Inflation Factor (VIF) for model5_log_linear")+
+  theme(axis.text.x = element_text(angle = 25))
+```
+
+For model5_log_linear, we can see the highest VIF=6.51 which is from the variable 'bedroom' too. We already know bedrooms and bathrooms are highly correlated. So this also matches our assumption. However, the VIF is just a little bigger than 5 (=5.21) in model4_log_log. So we can still keep this variable here. Let's keep exploring other regression diagnostics of these 2 models.
+
+### Check Distribution of Residuals and Homoscedasticity by plot
+
+With a good linear regression model, the residual' distribution should look like white noise N~(0,sigma^2). We can check in below in the Normal Q-Q plot. We can also check the homoscedasticity assumption on the Scale_Location plot.
+
+**For model4_log_log:**
+
+```{r  message=FALSE, warning=FALSE}
+par(mfcol=c(2,2))
+plot(model4_log_log)
+```
+
+
+**For model5_log_linear:**
+
+```{r  message=FALSE, warning=FALSE}
+par(mfcol=c(2,2))
+plot(model5_log_linear)
+```
+ 
+* From above, we can see model4_log_log holds homoscedasticity better than model5_log_linear. The red line is horizontal without any obvious trend. 
+* Both Normal Q-Q plot shows a tail on the upper side. This situation might result from some very expensive listing rentals like $2000 per night mansions. But with the good performances on our test data, and all nice regression indices (Adjusted R squared, AIC, etc), I will say both 2 models are good to use. 
+
+### Check Independency of Residuals
+
+```{r  message=FALSE, warning=FALSE}
+durbinWatsonTest(model4_log_log$residuals)
+durbinWatsonTest(model5_log_linear$residuals)
+```
+
+Both p values>0.05 which means we accept H0. The residuals are independent in both these models.
+
+## Conclusion:
+
+Both log_log and log_linear models are good to use. I personally prefer the model5_log_linear model since its AIC is low with the highest R squared	and Adjusted R squared. It also performs really well on the test data set. For cross-validation, its RMSE is also the minimum. 
+
+So my final model is the model5_log_linear model.
+
+
+

@@ -1,0 +1,11 @@
+City used for Training	State Training	City used for Testing	State Testing
+Dallas	Texas	Austin (use Dallas model to test)	Texas
+Chicago	Illinoise	San Diego (use Los Angeles model to test)	California
+Los Angeles	California	Newark (use New York City model to test)	New Jersey
+Columbus	Ohio		
+Denver	Colorado		
+San Francisco	California		
+New York City	New York		
+seattle	Washington		
+Portland	Oregon		
+Boston	Massachusetts		

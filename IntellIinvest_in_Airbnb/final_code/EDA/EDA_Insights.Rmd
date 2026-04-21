@@ -1,0 +1,79 @@
+---
+title: "EDA(Exploratory Data Analysis) Insights"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# How AIRBNB price changes on monthly basis
+
+The aim of this EDA is to give an overview how AIRBNB price rate changes on month to month basis and Boston city was taken for reference. 
+
+```{r}
+#installing packages
+library("colorspace")
+library("ggplot2")
+library("tidyverse")
+library("dplyr")
+library("data.table")
+
+#Setting the directort for the data set
+setwd("/Users/pooja/Desktop/GT_College/08_MGT_6203/Group_Project/eda_work")
+
+#Reading Boston Calendar data set from Sep-2022 to June-2022
+boston_whole_dataset <- read.csv("boston_whole.csv")
+head(boston_whole_dataset, 5)
+
+#Summing of the price monthwise 
+boston_whole_dataset1 = aggregate(list(price=boston_whole_dataset$price),by=list(month_details=cut(as.POSIXct(boston_whole_dataset$date),"month")),sum)
+boston_whole_dataset1
+
+#Renaming the row names to actual month names
+boston_whole_dataset1$month_details <- c("Sep","Oct","Nov","Dec","Jan","Feb","Mar","Apr",
+                                     "May","June")
+boston_whole_dataset1
+
+#plotting the income vs month
+boston_whole_dataset1 %>% 
+  group_by(price,month_details) %>%
+  ggplot(aes(y=price, x=month_details)) + 
+  geom_col(fill = "blue", alpha = 0.5)+
+  theme_grey()+
+  theme(panel.grid.minor = element_blank())+
+  labs(title = "How AIRBNB price changes on monthly basis",
+       x = "Month", y = "Price", fill = "Room Type")
+
+```
+### Observations:
+- We can see that October month where the price was high. 
+- We assume that during October month the COVID-19 risk was little low due to which there might be more demand in October month and price is high
+
+
+# Which room type is more popular
+
+The aim of this EDA is to give an overview which room type has better review rating as well as cost effective 
+
+```{r}
+#Reading the Dallas data set
+dallas_oct_data <- read.csv("dallas_eda.csv")
+head(dallas_oct_data,5)
+
+#checking the column names
+colnames(dallas_oct_data)
+
+#Plotting the graph between price, average score rating and room type
+dallas_oct_data %>%
+  group_by(room_type) %>%
+  summarise(avg_price = mean(price), avg_review= mean(review_scores_rating)) %>%
+  ggplot(aes(x=room_type, fill=avg_price, y = avg_review))+
+  geom_col(color = "White")+
+  theme_grey()+
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
+  labs(title = "Which room types are most popular?",
+       x = "Room Type", y = "Average Reviews", fill = "Price")
+```
+
+### Observations:
+- Entire home is most epxensive where shared room is cheaper which is making sense. 
+- Both entire home as well as provate room has better review rating. 
