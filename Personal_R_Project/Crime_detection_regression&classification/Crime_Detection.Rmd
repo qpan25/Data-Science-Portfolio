@@ -1,0 +1,802 @@
+---
+title: "HW7 CART, RandomForests and Logistic Regression"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{css echo=FALSE}
+.custom-inline {
+  color: red;
+  font-weight: 690
+}
+```
+
+## Question 10.1
+
+Using the same crime data set uscrime.txt as in Questions 8.2 and 9.1, find the best model you can using (a) a regression tree model, and (b)
+a random forest model.
+In R, you can use the tree package or the rpart package, and the randomForest package. For each model, describe one or two qualitative takeaways you get from analyzing the results (i.e., don’t just stop when you have a good model, but interpret it too).
+
+## General Observation
+
+```{r  message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(kableExtra)
+library(tidyr)
+library(stats)
+library(caret)
+library(ggcorrplot)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(pROC)
+set.seed(73)
+crime<-read.delim('uscrime.txt',header = T)
+#data description
+head(crime)
+```
+
+
+All the columns' descriptions are listed here:
+
+![](/Users/sophie/Desktop/R work directory /1.png)
+```{r  message=FALSE, warning=FALSE}
+summary(crime)
+```
+
+From above we can see there are 47 observations (total 47 states in the US) as rows and 16 variables as columns in the uscrime.txt data set. The scales of each column are very different. Let's visualize their distribution by box whisker plot and density plot.
+
+```{r, echo=FALSE,fig.width=12}
+crime1<-crime%>%mutate(State=1:47)%>%
+  pivot_longer(cols=M:Crime,names_to='Variable',values_to = 'value')
+ggplot(data=crime1,aes(x=value,group=Variable,fill=Variable))+
+  geom_boxplot(alpha=0.4)+
+  facet_wrap(~Variable,scales='free')+coord_flip()
+```
+```{r, echo=FALSE,fig.width=12}
+crime1<-crime%>%mutate(State=1:47)%>%
+  pivot_longer(cols=M:Crime,names_to='Variable',values_to = 'value')
+ggplot(data=crime1,aes(x=value,group=Variable,fill=Variable))+
+  geom_density(alpha=0.4)+
+  facet_wrap(~Variable,scales='free')
+```
+
+From the plot, we can see all the predictors' scales, distributions are very different. Most of them are not normally distributed, only Time and Wealth columns seem like normal distributions. All others are skewed. Furthermore, predictor So is a binary variable. If it is one of the predictors that we choose to fit in a model based on the numeric values of the predictors, we will need to scale the whole data set but reserve it without scaling. However, the decision tree and the random forest are not sensitive for scaling, so we are good to use the original dataset.
+
+```{r  message=FALSE, warning=FALSE}
+# check whether there is any NA
+crime%>%summarise_all(~ sum(is.na(.)))
+```
+
+From above, we can see there is no missing value.
+
+## Solution for Q10.1:
+
+### Build Regression Tree by rpart()
+
+```{r  message=FALSE, warning=FALSE}
+set.seed(73)
+tree1<-rpart(Crime~.,data=crime,method = 'anova')
+#method=“anova” because we are building a regression tree, for classification tree, method=“class”
+tree1
+```
+
+The above is the tree's structure by indentation which is the same as the plot I put below.
+
+Some explanations about the output:
+
+* node: The ith node in the tree. A smaller number means it is nearer to the root.
+* split: The condition the split is based on.
+* n: How many total samples are in this node.
+* deviance: RSS=sum of squares of residuals=sum((every point-yval) ^2)
+* yval: The prediction of each sample=mean(response value of all samples inside this node)
+
+Note: the line marked with "*" at the end means it is a leaf.
+
+Let's visualize the tree:
+
+```{r  message=FALSE, warning=FALSE}
+rpart.plot(tree1,box.palette="RdBu", type=1,shadow.col="gray", nn=TRUE,extra = 1)
+```
+
+From above we can tell the tree is split by only 3 predictors: Po1, Pop, and NW. There are 4 leaf nodes & 2 branching points.
+
+We can see the first level of the split is divided by Po1, if Po1>=7.7, it belongs to the right node, and any sample with Po1<7.7 belongs to the left node. For lower-level splitting, the logic is the same. For each node, we can see there is a number on the top. This is the prediction of the response value of all data in this node. eg.n=14 for the most right low leaf means how many data points are in this node which =14.
+
+**Check the R_squared of our tree1 and double confirm whether yval=prediction for tree1**
+
+Since rpart already using 10 fold cross-validation, we can directly use the yval value to calculate the RSS(SSE) and R_squared. 
+
+```{r  message=FALSE, warning=FALSE}
+prediction_tree1<-predict(tree1)
+head(prediction_tree1) # compare these value to the yhat above, they are the same.
+
+#calculate the R^2
+SSE<-sum((crime$Crime-prediction_tree1)^2) #sum of squared error
+SST<-sum((crime$Crime-mean(crime$Crime))^2)
+
+R_squared_tree1<-1-SSE/SST
+R_squared_tree1
+```
+Let's visualize the real response vs the predictions:
+
+```{r, echo=FALSE}
+df<-data.frame(real_response=crime$Crime, prediction=prediction_tree1)
+df%>%ggplot(aes(x=real_response,y=prediction))+geom_point(color='grey28')+geom_abline(color='blue',linetype='dashed')+ggtitle('The Performance of tree1')
+```
+
+Since the regression tree predicts each data point by the mean value inside that node, we can see all the predictions are not spread around but plotted as horizontal dotted lines. 
+
+```{r  message=FALSE, warning=FALSE}
+printcp(tree1)
+```
+
+The cptable is the lower part of this output with columns: CP, nsplit, rel_error, xerror and xstd. These information are very important for pruning the tree. 
+
+* Root node error = The percent of incorrectly classification data point for classification tree 
+* Root node error = SST/n = MSE for regression tree
+
+### Pruning of the Regression Tree
+
+```{r  message=FALSE, warning=FALSE}
+cptable<-data.frame(tree1$cptable)
+cptable
+```
+
+Some explanations for cptable:
+
+* nsplit: the number of splits that has to be operated
+* xerror: the percentage of cross-validation error compared with root total error (rpart has built-in cross-validation with 10 folds) 
+* rel_error: the percentage of real error compared with root total error from the training set
+* xstd: standard error for xerror
+* CP: complexity parameter, if any split does not increase the overall
+R_Squared of the model by at least a certain cp, the split is discarded. In rpart, the default cp=0.01. We can see above there is no split with CP <0.01.
+
+```{r  message=FALSE, warning=FALSE}
+plotcp(tree1) #check min xerror to decide where to prune
+```
+
+**Two methods of how to decide where to prune the tree:**
+
+1. A simple rule would be to choose the tree with the smallest cross-validation error(xerror). But this tree might be complex. If we can find a simpler tree that performs as well as this tree, we can choose the simpler one.
+
+2. 1-SE rule:  if a tree’s xerror is within 1 standard error of the min, they can be thought as equal. If one number is within one standard error from the other number, the two numbers can be thought of as statistically equal. 
+
+**Step for 1-SE Rule: **
+
+1. find min(xerror) 
+2. threshold=min(xerror)+ its xstd
+3. find all xerror<threshold
+4. use the smallest tree as our final tree
+
+From the cptable, we can see min(xerror)=0.8671717, threshold=0.8671717+0.1816347=1.048806, the xerror of row 2,3,4 <1.0488,
+we then choose the smallest tree as the 2nd row with CP=0.14814320.
+
+```{r  message=FALSE, warning=FALSE}
+cpvalue <- cptable[which.min(cptable$xerror),1]
+prune_tree1<-prune(tree1, cpvalue)
+prune_tree1
+```
+
+```{r  message=FALSE, warning=FALSE}
+rpart.plot(prune_tree1,box.palette="RdBu", type=1,shadow.col="gray", nn=TRUE,extra = 1)
+```
+
+Calculate R_squared of the prune_tree1 :
+
+```{r  message=FALSE, warning=FALSE}
+prediction_prunetree1<-predict(prune_tree1)
+SSE_prunetree1<-sum((crime$Crime-prediction_prunetree1)^2)#sum of squared error
+
+R_squared_prunetree1<-1-SSE_prunetree1/SST
+R_squared_prunetree1 
+```
+
+The new R_squared of prune_tree1 is lower than the original tree1. This is not surprising. We built a more simple tree and tolerant more error to avoid overfitting. 
+
+### Build Real Linear Regression Models with the 2 Leaves
+
+rpart use the mean response value in each leaves as the prediction for all data inside that leaf. We can tell from the R_squared, the prediction is not very ideal. Let's try to use a real linear regression model on the split dataset and see whether the performance will be better.
+
+```{r  message=FALSE, warning=FALSE}
+prune_tree1$frame
+prune_tree1$where #the number is the row index of prune_tree1$frame
+# 2 corresponding with Po1< 7.65, 3 corresponding with Po1>= 7.65
+
+mask1<-prune_tree1$where==2
+mask2<-prune_tree1$where==3
+crime_sub1<-crime[mask1,] #will be used for lm model1
+head(crime_sub1,4) # We can see all po1<7.65
+crime_sub2<-crime[mask2,] #will be used for lm model2
+```
+
+Build linear regression model1 with the first leaf:
+
+```{r  message=FALSE, warning=FALSE}
+lm_model1<-lm(Crime~.,data=crime_sub1)
+summary(lm_model1)
+```
+
+The R-squared and the adjusted R-squared are better than both of our tree models. But only 4 predictors are significant and the F-statistic with p-value>0.05 which means our model is not significant! 
+
+Let's eliminate the irrelevant predictors and build another linear regression model only with the significant predictors:(Making variable selection with coefficients' p-value is not ideal, but since we have such a high ratio with data amount to the number of the predictors together with the poor performance of the current model, it worth a try.)
+
+```{r  message=FALSE, warning=FALSE}
+lm_model1_4<-lm(Crime~Ed+Pop+Prob+Time,data=crime_sub1)
+summary(lm_model1_4)
+```
+This model is better with F-statistic but only Pop and Time are significant. Both R-squared and Adjusted R-squared decrease by around 0.2. I can't see any improvement at this point.
+
+Let's final try with only Time+Pop as our predictors:
+
+```{r  message=FALSE, warning=FALSE}
+lm_model1_2<-lm(Crime~Pop+Time,data=crime_sub1)
+summary(lm_model1_2)
+```
+
+The F-statistic is better with the p-value of 0.0164 and only Pop is significant. The Adjusted r-squared turns to be worse as 0.271. I still can't see any great improvement at this point. With such a small dataset, it is really hard to get a nice linear regression model.
+
+Build linear regression model1 with the 2nd leaf:
+
+```{r  message=FALSE, warning=FALSE}
+lm_model2<-lm(Crime~.,data=crime_sub2)
+summary(lm_model2)
+```
+
+
+Only Ineq and the Intercept is significant. The adjusted R-squared and R-squared are good. The F-statistic is still significant which is good.
+However, with so many predictors irrelevant, we can't just use this model. So let's try to eliminate all predictors but only keep Ineq as our predictor!
+
+```{r  message=FALSE, warning=FALSE}
+lm_model2_1<-lm(Crime~Ineq,data=crime_sub2)
+summary(lm_model2_1)
+```
+
+Neither the Ineq nor the intercept is significant and the F-statistics' p-value is so big means that the model doesn't show any value. In my opinion, the 2nd leaf of the data is not proper for the linear regression model. We will need to try to use other models to fit it in the future.
+
+Here is the table for comparing all models:
+```{r,echo=FALSE}
+final<-read.delim('compare1.txt',header = TRUE)
+final%>% kbl() %>% kable_styling(font_size = 11)
+```
+With trying so many linear regression models, all of the results are not that ideal. Only the model generated by the 2nd leaf with all predictors seems better (but the p-value for F-statistic is at the edge of statistical significance). Without cross-validation, we can't guarantee its performance on other real data in the future. However, cross-validation with such small training data (23-24 data points on each leaf) is also meaningless. 
+
+### RandomForests Model
+
+```{r  message=FALSE, warning=FALSE}
+set.seed(73)
+forest<-randomForest(formula=Crime~.,data=crime,replace=TRUE,importance=T,keep.forest=TRUE)
+forest
+```
+
+
+* % Var explained is the R_squared value.
+* ntree=500: build 500 trees is the default, I didn't specify another number here because of our super small dataset.
+* mtry: how many random predictors to choose from for the split. The default number for regression tree=n/3, classification tree=sqrt(n), n=how many predictors we have
+* replace=True: when sample the original data, we can duplicate the data points.
+
+**Note: increasing the number of trees(mtry) to high values does not necessarily make the model overfit the data due to the averaging involved. Usually increasing the number of trees will decrease the test error until a certain threshold is reached. Once this threshold is reached increasing the number of trees will just keep the performance at this threshold. Our goal is to find a number of trees that is sufficiently large to reach an acceptable test error threshold but not too large that costs unnecessary computation.** 
+
+For our situation, with such as small dataset (only 47 states), 500 trees are quite enough so I won't test any other larger number of trees for my random forest model.
+
+```{r  message=FALSE, warning=FALSE}
+#Manually calculate R_squared to check whether =%Var explained 
+R_squared_forest<-1-sum((forest$predicted-crime$Crime)^2)/SST
+R_squared_forest
+```
+From above we can see they are equal. Furthermore, this R_squared < decision tree1's R_squared which equal to 0.5628. It is not surprising since randomForest is good for avoiding overfitting. 
+
+```{r, echo=FALSE}
+df<-data.frame(real_response=crime$Crime, prediction=forest$predicted)
+df%>%ggplot(aes(x=real_response,y=prediction))+geom_point(color='grey28')+geom_abline(color='blue',linetype='dashed')+ggtitle('The Performance of RandomForest')
+
+```
+
+Just compare the predictions from the random forest vs regression decision tree. The predictions are more spread out and look like it makes more sense since all of the values are the average of these 500 trees. The overfitting is much more reduced! 
+
+Random forests can be used to rank the importance of variables in a regression or classification problem. 
+Let's check the importance of our predictors:
+```{r  message=FALSE, warning=FALSE}
+importance(forest)
+varImpPlot(forest,main = 'Top Variable Importance',bg = "skyblue",cex=0.8)
+```
+
+* %IncMSE: Percentage increase in mean square error is analogous to accuracy-based importance, and is calculated by shuffling the values of the out-of-bag samples.
+
+* IncNodePurity: Increase in node purity is analogous to Gini-based importance, and is calculated based on the reduction in the sum of squared errors whenever a variable is chosen to split.
+
+%IncMSE and IncNodePurity are both good indicators for variable importance. But their ranks are not always the same. (Take our plot as an example, the Wealth and NW's rankings are different.)
+
+From the plot we can tell the most important predictor for splitting is Po1 which is the same as our decision tree analysis.
+
+### Manually Cross-Validation with RandomForests Model
+
+Normally speaking, it is not necessary to run cross-validation with random forest because it already runs so many trees randomly and is fair enough to prevent overfitting. If we have a large dataset, we can expect to see the performance of cv is equal to the random forest built directly from the dataset.
+
+However, let's experiment with the cross-validation here on our super tiny data. I aim to check whether the performance from cv is still equal to the performance of our random forest model--forest.
+
+Split the crime dataset into 6 folders and run cross-validation to check the model's real performance:
+
+```{r  message=FALSE, warning=FALSE}
+set.seed(73)
+train_validation_data<-crime
+train_validation_data$label<-sample(factor(rep(1:6, length.out = 47))) # 6 folders
+head(train_validation_data,3)
+#create df_lst contain 6 sub_dfs
+label<-1:6
+df_list<-list()
+for (i in label){
+  df_temp<-train_validation_data[train_validation_data$label==i,]
+  df_list[[i]]<-df_temp
+}
+
+R_squared<-c()
+for (i in label){
+  validation_response<-df_list[[i]][,16] #Crime columns as real response
+  validation<-df_list[[i]][,-c(17,16)] #eliminate label and Crime column
+  train<-bind_rows(df_list[-i])[,-17] #eliminate label column
+  set.seed(73)
+  model<-randomForest(Crime~.,data=train,importance=T)
+  predictions<- predict(model,newdata=validation)
+  sst<-sum((validation_response-mean(validation_response))^2)
+  r2<-1-sum((validation_response-predictions)^2)/sst
+  R_squared<-c(R_squared,r2)
+}
+R_squared
+mean(R_squared)
+```
+
+The R_squared from cross-validation is much lower than the original forest model(0.423). Most of the time, the performance from cross-validation should be lower than the one with the training set since it didn't count in the fit of the random pattern. But random forest should have already spread out the random pattern in many trees and provide a much more unbiased result. This lower score here is mainly because of our super small dataset. With split into 6 folds, some forest built by 5 of the folds doesn't have a chance to learn the important data points in the 6th fold which may cause a big error. From the R_squared vector, we can see the R_squared are very unstable, even negative values show up.
+
+### Build 2 RandomForests Models with 2 different leaves 
+
+```{r  message=FALSE, warning=FALSE}
+set.seed(73)
+forest_sub1<-randomForest(formula=Crime~.,data=crime_sub1,replace=TRUE,importance=T,keep.forest=TRUE)
+forest_sub1
+```
+With the leaf that Po1<7.65, our R-squared drop to 16% which is caused by an even smaller dataset (23 data points).
+
+```{r  message=FALSE, warning=FALSE}
+importance(forest_sub1)
+```
+
+Very interesting found here is after we split the dataset by Po1, the most important variable in leaf 1 is not Po1 anymore but change to M! This is reasonable since we already use Po1 to split our data, the variable in leaf 1 that affects most of our prediction error is changed to another predictor.
+
+```{r  message=FALSE, warning=FALSE}
+set.seed(73)
+forest_sub2<-randomForest(formula=Crime~.,data=crime_sub2,replace=TRUE,importance=T,keep.forest=TRUE)
+forest_sub2
+```
+
+
+We can see the R-squared drops to 4.53% which means the random forest model is not ideal for the 2nd leaf(Po1>=7.65). Till now, we haven't found a good model to use on either side of our leaves. Neither linear regression nor random forest. With such a small dataset, it is indeed hard!
+```{r  message=FALSE, warning=FALSE}
+importance(forest_sub2)
+```
+The most important variables in leaf 2 are M and NW.
+
+## Question 10.2
+
+Describe a situation or problem from your job, everyday life, current events, etc., for which a logistic regression model would be appropriate. List some (up to 5) predictors that you might use. 
+
+## Solution for Q10.2:
+
+The real estate market is red hot since the pandemic. Most of the time, people purchase houses with a loan from banks. Since the house is not 100% owned by the new homeowner, the bank usually requires the new homeowner to buy a homeowner’s insurance.
+
+However, owning a house and having the ability to pay the fee for the homeowner’s insurance can’t guarantee the owner is eligible for the insurance. To help an insurance company decide whether to provide insurance to the applicant, here are 5 predictors, from which the insurance company can get a probability of whether the candidate is a good one or not. By setting a threshold, the company can easily decide whether to approve the application or not.
+
+* The year the home was built (numeric)
+* The value of the house (numeric)
+* Whether the home is located at hazard area (flood zone, wildfire zone, etc) (binary)
+* Whether the applicant has homeowners’ insurance in the past (binary)
+* The applicant’s credit score (numeric)
+
+## Question 10.3
+
+
+1. Using the GermanCredit data set germancredit.txt from http://archive.ics.uci.edu/ml/machine- learning-databases/statlog/german / (description at http://archive.ics.uci.edu/ml/datasets/Statlog+%28German+Credit+Data%29 ), use logistic regression to find a good predictive model for whether credit applicants are good credit risks or not. Show your model (factors used and their coefficients), the software output, and the quality of fit. You can use the glm function in R. To get a logistic regression (logit) model on data where the response is either zero or one, use family=binomial(link=”logit”) in your glm function call.
+
+2. Because the model gives a result between 0 and 1, it requires setting a threshold probability to separate between “good” and “bad” answers. In this data set, they estimate that incorrectly identifying a bad customer as good, is 5 times worse than incorrectly classifying a good customer as bad. Determine a good threshold probability based on your model.
+
+## General Observation
+
+```{r  message=FALSE, warning=FALSE}
+credit<-read.delim('germancredit.txt',stringsAsFactors=TRUE,header = F,sep=' ')
+#data description
+head(credit,3)
+```
+Here are the description of all variables:
+![](/Users/sophie/Desktop/R work directory /image.png)
+
+```{r  message=FALSE, warning=FALSE}
+str(credit)
+```
+From above we can see there are 1000 data points in the credit dataset with 21 columns. 7 of them are numerical, 13 are categorical. The last one V21 is our response column with values 1 and 2. We will need to change them to 0 and 1 for our logistic regression model.
+
+**Note 1:** For logistic regression, we don't need to scale our data. Scaling might help speed up gradient descent. This is because θ will descend quickly on small ranges and slowly on large ranges, and so will oscillate inefficiently down to the optimum when the variables are very uneven.
+
+**Note 2:** Many columns are categorical. With this kind of data, R automatically uses one-hot encoding to interpret each level in all categorical predictors as a new predictor for the final response. The value for the new predictor is either 0 or 1. 0 indicates non-existent while 1 indicates existent. From below you can see the output from the logistic regression model with the coefficients of V1A12, V1A13, etc.
+
+Preprocess the response column:
+```{r  message=FALSE, warning=FALSE}
+credit$V21[credit$V21==1]<-0
+credit$V21[credit$V21==2]<-1
+```
+
+Separate the dataset into 80% training and 20% testing:
+```{r  message=FALSE, warning=FALSE}
+set.seed(73)
+train<-sample_n(credit,size=800,replace=F)
+test<-credit%>%setdiff(train)
+```
+
+```{r  message=FALSE, warning=FALSE}
+#check whether there is any overlap between training and test dataset
+train%>%inner_join(test)
+```
+We can see it is split successfully.
+
+### Logistic Regression Model with All Predictors
+
+```{r  message=FALSE, warning=FALSE}
+log_model1<-glm(V21~.,family=binomial(link ='logit'),data=train)
+summary(log_model1)
+```
+
+We can see all the categorical predictors' levels become individual predictors and have their own coefficients. Some of them are statistical significant, some are not. I will do some variable selection based on the p-value later.
+
+#### Predict Our Test Data:
+
+```{r  message=FALSE, warning=FALSE}
+thres=0.5
+predict1<-predict(log_model1,test,type="response")
+#need to set type="response" or the output is log-odds and hard to read
+head(predict1)
+predict1_binary<-as.integer(predict1>thres)
+head(predict1_binary)
+```
+
+#### Calculate ROC and AUC for log_model1
+
+```{r  message=FALSE, warning=FALSE}
+roc_log_model1<-roc(test$V21,predict1)
+roc_log_model1
+```
+
+Draw ROC Curve:
+
+```{r, echo=FALSE}
+p<-ggroc(roc_log_model1,color='red',legacy.axes = T)+
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="grey", linetype="dashed")+geom_text(aes(x=0.75,y=0.25,label='AUC=0.797'),color='darkgrey',size=11)+labs(x = "1 - Specificity",y = "Sensitivity")+ggtitle('ROC with log_model1')
+p
+```
+
+
+
+#### Form the confusion matrix:
+
+```{r  message=FALSE, warning=FALSE}
+confuse_logmodel1_0.5<-as.matrix(table(predict1_binary,test$V21))
+dimnames(confuse_logmodel1_0.5) = list(Predicted = c("good=0", "bad=1"), Actual= c("good=0", "bad=1"))
+confuse_logmodel1_0.5 
+
+# the column is the real response, the row is predicted. Be careful this is different from our module.
+# 0=Positive=good, 1=Negative=bad
+
+sensiitivity_logmodel1_0.5<-confuse_logmodel1_0.5[1,1]/sum(confuse_logmodel1_0.5[,1])
+sensiitivity_logmodel1_0.5
+specificity_logmodel1_0.5<-confuse_logmodel1_0.5[2,2]/sum(confuse_logmodel1_0.5[,2])
+specificity_logmodel1_0.5
+
+accuracy_logmodel1_0.5<-sum(diag(confuse_logmodel1_0.5))/sum(confuse_logmodel1_0.5)
+accuracy_logmodel1_0.5
+```
+
+The accuracy=0.745, Sensitivity=0.888, Specificity=0.455 for log_model1 with threshold=0.5.
+
+Which threshold is the best for our log_model1? It should result in the highest accuracy together with both relatively high sensitivity and specificity. Furthermore, the cost of FP is 5 times the cost of FN. (0 = Good = Positive, 1 = Bad = Negative) We should consider the cost with the accuracy together for our final logistic regression model!
+
+**Total cost of miss identify=5FP+FN**
+
+Let's run a loop for threshold starts from 0.1 to 0.9 with step 0.1:
+
+```{r  message=FALSE, warning=FALSE}
+step<-seq(0,1,0.1)
+step
+sensitivity_logmodel1<-c()
+specificity_logmodel1<-c()
+accuracy_logmodel1<-c()
+cost_logmodel1<-c()
+for(i in step){
+  thres=i
+  predict1_binary<-as.integer(predict1>thres)
+  confuse_matrix<-as.matrix(table(predict1_binary,test$V21))
+  if(nrow(confuse_matrix)==2) {
+    sensitivity<-confuse_matrix[1,1]/sum(confuse_matrix[,1])
+  }else if(thres>0.5){
+    sensitivity=1
+  }else(sensitivity=0)
+  
+  if(nrow(confuse_matrix)==2) 
+    #confuse matrix will not form as 2*2 with extreme boundary, need to specify!
+  {specificity<-confuse_matrix[2,2]/sum(confuse_matrix[,2])
+  }else if(thres>0.5){
+    specificity=0}else{specificity=1}
+  
+  accuracy<-sum(diag(confuse_matrix))/sum(confuse_matrix)
+  if(nrow(confuse_matrix)==2){cost<-confuse_matrix[1,2]*5+confuse_matrix[2,1]
+    }else if(thres>0.5){cost=confuse_matrix[1,2]*5}else{cost=confuse_matrix[1,1]}
+  # This is the part that makes people confused with "confuse matrix". Draw a picture is a good ideal:)
+  
+  sensitivity_logmodel1<-c(sensitivity_logmodel1,sensitivity)
+  specificity_logmodel1<-c(specificity_logmodel1,specificity)
+  accuracy_logmodel1<-c(accuracy_logmodel1,accuracy)
+  cost_logmodel1<-c(cost_logmodel1,cost)
+}
+
+df_logmodel1<-data.frame(threshold=step,sensitivity=sensitivity_logmodel1,
+                         specificity=specificity_logmodel1,
+                         accuracy=accuracy_logmodel1,cost=cost_logmodel1)
+df_logmodel1
+```
+
+```{r, echo=FALSE}
+df_logmodel1%>% ggplot()+
+  geom_point(aes(x=threshold,y=sensitivity),color='darkorange')+
+  geom_line(aes(x=threshold,y=sensitivity),alpha=0.4)+
+  geom_point(aes(x=threshold,y=specificity),color='blue')+
+  geom_line(aes(x=threshold,y=specificity),alpha=0.4)+
+  geom_point(aes(x=threshold,y=accuracy),color='darkgreen')+
+  geom_line(aes(x=threshold,y=accuracy),alpha=0.4)+
+  ylab("Value")+xlab('Threshold')+
+  ggtitle('Sensitivity, specificity and accuracy moving with threshold')+
+  geom_text(aes(x=0.69,y=0.1,label='Specificity'),color='grey29')+
+  geom_text(aes(x=0.75,y=0.62,label='Accuracy'),color='grey29')+
+  geom_text(aes(x=0.8,y=0.89,label='Sensitivity'),color='grey29')
+```
+```{r, echo=FALSE}
+df_logmodel1%>% ggplot()+
+  geom_point(aes(x=threshold,y=cost),color='red')+
+  geom_line(aes(x=threshold,y=cost),alpha=0.4)+
+  ylab("Cost")+xlab('Threshold')+
+  ggtitle('Cost moving with threshold')
+```
+
+Threshold and sensitivity are positively correlated with each other. Sensitivity is negatively correlated with specificity.
+
+Based on our observation, for log_model1, if we mainly focus on the prediction accuracy, thresholds between 0.3~0.7 are quite similar. Sensitivity and specificity lines cross around each other between the thresholds 0.2 and 0.3 which means for these 2 thresholds, the sensitivity and specificity and balanced, neither one is too high or too low.
+
+However, the cost of FP is 5 times the cost of FN. From above we can see the lower the threshold, the less the loss, this is because if we set the threshold very low, we will categorize most of the customers as 1 which means they are "bad" to protect the bank itself.
+
+When threshold=0.3, the cost is relatively low. Sensitivity and specificity are beautifully balanced.
+
+### Logistic Regression Model with Statistical Significant Predictors
+
+From the output from log_model1, we can see there are many coefficients that are not statistical significant. Let's eliminate some of the predictors and build a new model. But need to keep in mind **If we decide to keep only predictors with p-values lower than a threshold (normally=0.05), we have to keep the whole categorical predictor if any level inside it is significant.**
+
+#### Build log_model2
+
+```{r  message=FALSE, warning=FALSE}
+log_model2<-glm(V21~V1+V2+V3+V4+V5+V6+V8+V9+V10+V13+V14,family=binomial(link = "logit"),data=train)
+summary(log_model2)
+```
+
+We can see at this time, the AIC decrease from 809.27 to 790.2 which is better.
+
+#### Calculate ROC and AUC for log_model2
+
+```{r  message=FALSE, warning=FALSE}
+predict2<-predict(log_model2,test,type="response")
+roc_log_model2<-roc(test$V21,predict2)
+roc_log_model2
+```
+
+We can see the AUC didn't improve at all for this model. So let's keep moving on to eliminates V5 and V9.
+
+#### Build log_model3 
+
+```{r  message=FALSE, warning=FALSE}
+log_model3<-glm(V21~V1+V2+V3+V4+V6+V8+V10+V13+V14,family=binomial(link = "logit"),data=train)
+summary(log_model3)
+```
+
+#### Calculate ROC and AUC for log_model3
+
+```{r  message=FALSE, warning=FALSE}
+predict3<-predict(log_model3,test,type="response")
+roc_log_model3<-roc(test$V21,predict3)
+roc_log_model3
+```
+
+We can see this time, both AUC decrease and AIC increase which means this model is worse than before! It seems by eliminating the whole predictors based on the p-value doesn't really improve the performance.
+
+### Decompose Levels from Categorical Columns and Build Logistic Regression Model
+
+Use p-value<0.1 as the threshold for coefficients.
+
+```{r  message=FALSE, warning=FALSE}
+select_v1<-c('A13','A14') #select all significant levels
+select_v3<-c('A32','A33','A34')
+select_v4<-c('A41','A410','A42','A43','A49')
+select_v6<-c('A64','A65')
+select_v9<-c('A93')
+select_v10<-c('A103')
+select_v14<-c('A143')
+lst<-list(select_v1,select_v3,select_v4,select_v6,select_v9,select_v10,
+          select_v14)
+names(lst)<-c(1,3,4,6,9,10,14) #rename our list
+
+train1<-train
+for (j in c(1,3,4,6,9,10,14)){
+  for (i in lst[[as.character(j)]]) {
+    vector<-rep(0,800)
+    mask<-train[,j]==i
+    vector[mask]=1
+    train1<-cbind(train1,vector)
+    
+  }
+}
+names(train1)[22:36]<-c('A13','A14','A32','A33','A34','A41','A410','A42','A43','A49','A64','A65','A93','A103','A143')
+head(train1)
+```
+Modify our test dataset:
+
+```{r  message=FALSE, warning=FALSE}
+test1<-test
+for (j in c(1,3,4,6,9,10,14)){
+  for (i in lst[[as.character(j)]]) {
+    vector<-rep(0,200)
+    mask<-test1[,j]==i
+    vector[mask]=1
+    test1<-cbind(test1,vector)
+    
+  }
+}
+names(test1)[22:36]<-c('A13','A14','A32','A33','A34','A41','A410','A42','A43','A49','A64','A65','A93','A103','A143')
+head(test1)
+```
+
+We can see both our training set and test set are with 36 predictors!
+
+#### Build log_model4
+
+Build our Logistic regression model with this new training dataset (train1) and test by the new test dataset (test1)
+
+```{r  message=FALSE, warning=FALSE}
+log_model4<-glm(V21~A13+A14+A32+A33+A34+A41+A410+A42+A43+A49+A64+A65+A93+A103+
+                  A143+V2+V5+V8+V13,family=binomial(link ='logit'),data=train1)
+summary(log_model4)
+```
+
+We can see most of our coefficients are significant! The AIC=790 which is not a big decrease compare with other models we build by original predictors.
+
+#### Predict test1 Data by log_model4:
+
+```{r  message=FALSE, warning=FALSE}
+predict4<-predict(log_model4,test1,type="response")
+head(predict4)
+
+```
+
+
+#### Calculate ROC and AUC for log_model4
+
+```{r  message=FALSE, warning=FALSE}
+roc_log_model4<-roc(test1$V21,predict4)
+roc_log_model4
+```
+
+The AUC increased a lot from mainly around 0.78 to 0.824. I like the improvement a lot. Let's take a look at the ROC curve.
+
+#### Draw ROC Curve:
+
+```{r, echo=FALSE}
+p<-ggroc(roc_log_model4,color='purple',legacy.axes = T)+
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="grey", linetype="dashed")+geom_text(aes(x=0.75,y=0.25,label='AUC=0.824'),color='darkgrey',size=11)+labs(x = "1 - Specificity",y = "Sensitivity")+ggtitle('ROC with log_model4')
+p
+```
+
+#### Build a Loop for the Performance of log_model4:
+
+```{r  message=FALSE, warning=FALSE}
+step<-seq(0,1,0.1)
+sensitivity_logmodel4<-c()
+specificity_logmodel4<-c()
+accuracy_logmodel4<-c()
+cost_logmodel4<-c()
+
+for(i in step){
+  thres=i
+  predict4_binary<-as.integer(predict4>thres)
+  confuse_matrix<-as.matrix(table(predict4_binary,test1$V21))
+  if(nrow(confuse_matrix)==2) {
+    sensitivity<-confuse_matrix[1,1]/sum(confuse_matrix[,1])
+  }else if(thres>0.5){
+    sensitivity=1
+  }else(sensitivity=0)
+  
+  if(nrow(confuse_matrix)==2) 
+    #confuse matrix will not form as 2*2 with extreme boundary, need to specify!
+  {specificity<-confuse_matrix[2,2]/sum(confuse_matrix[,2])
+  }else if(thres>0.5){
+    specificity=0}else{specificity=1}
+  
+  accuracy<-sum(diag(confuse_matrix))/sum(confuse_matrix)
+  if(nrow(confuse_matrix)==2){cost<-confuse_matrix[1,2]*5+confuse_matrix[2,1]
+    }else if(thres>0.5){cost=confuse_matrix[1,2]*5}else{cost=confuse_matrix[1,1]}
+  
+  sensitivity_logmodel4<-c(sensitivity_logmodel4,sensitivity)
+  specificity_logmodel4<-c(specificity_logmodel4,specificity)
+  accuracy_logmodel4<-c(accuracy_logmodel4,accuracy)
+  cost_logmodel4<-c(cost_logmodel4,cost)
+}
+
+df_logmodel4<-data.frame(threshold=step,sensitivity=sensitivity_logmodel4,
+                         specificity=specificity_logmodel4,
+                         accuracy=accuracy_logmodel4,cost=cost_logmodel4)
+df_logmodel4
+  
+  
+```
+Let's visualize the specificity, the sensitivity, and the accuracy.
+
+```{r, echo=FALSE}
+df_logmodel4%>% ggplot()+
+  geom_point(aes(x=threshold,y=sensitivity),color='darkorange')+
+  geom_line(aes(x=threshold,y=sensitivity),alpha=0.4)+
+  geom_point(aes(x=threshold,y=specificity),color='blue')+
+  geom_line(aes(x=threshold,y=specificity),alpha=0.4)+
+  geom_point(aes(x=threshold,y=accuracy),color='darkgreen')+
+  geom_line(aes(x=threshold,y=accuracy),alpha=0.4)+
+  ylab("Value")+xlab('Threshold')+
+  ggtitle('Sensitivity, specificity and accuracy moving with threshold')+
+  geom_text(aes(x=0.69,y=0.1,label='Specificity'),color='grey29')+
+  geom_text(aes(x=0.75,y=0.62,label='Accuracy'),color='grey29')+
+  geom_text(aes(x=0.8,y=0.89,label='Sensitivity'),color='grey29')
+```
+
+```{r, echo=FALSE}
+df_logmodel4%>% ggplot()+
+  geom_point(aes(x=threshold,y=cost),color='red')+
+  geom_line(aes(x=threshold,y=cost),alpha=0.4)+
+  ylab("Cost")+xlab('Threshold')+
+  ggtitle('Cost moving with threshold')
+```
+
+
+From above we can tell the overall cost has decreased a little compared with log_model1 which is good. 
+
+The accuracy of log_model4 is relatively higher at threshold=0.3, also at this point, specificity and sensitivity come across with each other. If we focus mainly on decreasing the cost, we should choose threshold = 0.1, however, if we want to get a threshold that balances each index, I will suggest choosing threshold=0.3. 
+
+Let's plot all of the ROC curves to visualize which model is the best with the largest AUC:
+
+```{r, echo=FALSE}
+lst_roc<-list(log_model1=roc_log_model1,log_model2=roc_log_model2,log_model3=roc_log_model3,log_model4=roc_log_model4)
+p<-ggroc(lst_roc,legacy.axes = T)+
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="grey", linetype="dashed")+labs(x = "1 - Specificity",y = "Sensitivity")+ggtitle('ROC with ALL log_models')
+p
+```
+
+We can see the purple ROC curve represents our log_model4 is with the biggest AUC. With setting threshold=0.1, the cost turns to be the lowest=91 among all logistic models, but the accuracy rate is lower than average. 
+
+**Compare all models' AIC & AUC:**
+
+```{r,echo=FALSE,warning=FALSE}
+final<-read.delim('roc.txt',header = TRUE)
+final%>% kbl() %>% kable_styling(font_size = 11)
+```
+
+### Conclusion
+
+* There are many categorical columns in the German Credit dataset. The glm() function can automatically apply one-hot encoding to interpret each level as a new predictor for the final response. 
+* If we want to use individual levels that are significant as predictors in our logistic regression model, we need to manually extract the level one by one from our original dataset.
+* The best model turns out to be log_model4 with predictors: A13+A14+A32+A33+A34+A41+A410+A42+A43+A49+A64+A65+A93+A103+A143+V2+V5+V8+V13.
+
+It's AUC=0.824 (the biggest among all models) and AIC=789.980 (smallest). The threshold I choose for log_model4 is 0.1 with the lowest cost=91 since we mainly focus on decreasing the cost other than balance the sensitivity and specificity. The accuracy from our test dataset = 0.605 which is not very high. But for decreasing the loss, we need to compromise with more FN.
+
+

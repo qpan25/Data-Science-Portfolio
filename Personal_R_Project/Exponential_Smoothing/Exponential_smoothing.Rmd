@@ -1,0 +1,549 @@
+---
+title: "HW4: Exponential smoothing"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{css echo=FALSE}
+.custom-inline {
+  color: red;
+  font-weight: 700
+}
+```
+## Question 7.1
+
+Describe a situation or problem from your job, everyday life, current events, etc., for which exponential smoothing would be appropriate. What data would you need? Would you expect the value of α (the first smoothing parameter) to be closer to 0 or 1, and why?
+
+## Solution for Q7.1:
+
+Weight loss apps are more and more popular these days. In order to help people successfully lose weight, the app needs to monitor people’s weight for analysis. Based on the result, the app can conclude how well the person did and predict the progress in the short future.
+
+Let’s consider a steady state of a healthy person with a balanced diet and regular exercise.
+Normally, our body weight changes within 24 hours as a cycle which corresponds to seasonality in exponential smoothing. We lost a lot of body water while asleep at night because we are not intaking any food or liquid. As a result, people lose some weight in the morning, normally around 2-4 lbs. The range of fluctuation is also depending on different sex, ages, and BMI. To correctly analyze the data, in my exponential smoothing algorithm, the cyclic factor C should be added in. (Monitoring the weight by hours is not realistic, I include it here just want to show how the cyclic pattern works in this situation. If we monitor weight daily at the same time, we can take off the C part in our formula.)
+
+When people are in the process of losing weight, there is also a decreasing trend. As a result, the parameter $T_{t}$ needs to be set up in the formula.
+
+Holt-Winters’ exponential smoothing formula:
+
+$S_{t}=αx_{t}/C_{t-L}+(1-α)(S_{t-1}+T_{t-1})$
+
+Let’s take a healthy female named Lucy, weight 150lb, age 30 as an example:
+
+Divide a day into 24 time periods. Lucy wakes up around 7 am every day and eats her breakfast around 8 am. Her morning weight before breakfast is around 147 lb. After breakfast, her weight is back to 150lb. During the daytime, Lucy needs to work, so she usually takes a simple sandwich as lunch which makes the fluctuation tiny. At 4 pm, Lucy will go to the gym and sweat a lot. Her weight can drop to 148lb. Lucy usually has her dinner from 7 pm to 8 pm. Also, her dinner is very fancy, sometimes she goes to a restaurant, sometimes her mom invites her to join the dinner together. Lucy enjoys dinner very much and eats a lot. After dinner until bedtime, Lucy didn’t eat but only drink water, so her weight gradually moves back to 150lb. She goes to bed at 11:00 pm. and when the next morning comes, another cycle begins.
+
+**For C and γ: **
+
+If Lucy has a regular lifestyle, we can probably observe the factors C as follow:
+
+*	After wake up to before breakfast: C7=147/150=0.98
+*	Day time: C8, C9 … C15=1
+*	Gym: C16=148/150=0.9867
+*	Drink water after gym: C17=C18=1
+*	Dinner: C19=C20=153/150=1.02
+*	After dinner to bedtime: C21, C22, C23=1.01
+*	Sleep: C24, C1…C6=1
+
+During the monitor process, all C in the different cycles will be adjusted by the new data, previous St, Ct-24, and γ. Since my scenario is Lucy’s life is very regular, so that means if there is one day, she goes to a party or sleeps at 2 am, etc, they are just random events. She probably will be back to her normal schedule the next day. As a result, the γ should be small, maybe around 0.2 or even smaller.
+
+**For T and β:**
+
+Normally, the weight loss won’t be very fast if Lucy follows a healthy exercise plan and eats regularly (small absolute value of T). However, if she tries an aggressive diet plan (I have tried not eating normal food but only drink water and eat 2 apples daily, I lost 9lb within a week), she can lose weight fast which means a big decreasing trend (big absolute value of T).
+
+* Healthy weight loss plan: we probably will see the avg of trend around this value:
+24 parts a day, 30 days to lose 5lb: T= -5/(24*30) = -0.006944
+
+*	Aggressive weight loss plan: we probably will see the avg of trend around this value:
+24 parts a day, 30 days to lose 30lb: T=-30/(24*30)= -0.04167
+
+No matter which weight loss plan Lucy use, there are normal daily weight fluctuation and randomness such as she is out of control in one day and eat KFC. Losing weight is tough, not everyone can be successful which mean change of trend can be easy! So I think β maybe 0.6. 
+ 
+**For α:**
+
+Because weight can be affected easily by just drinking a big bottle of water or just went to the restroom, I will give more weight on my previous $S_{t-1}$ other than the measurement of the weight at that moment $x_{t}$. So I think α should be small maybe around 0.15.
+
+A good app with a great exponential smoothing algorithm can set different α, β, γ based on the customer's lifestyle and even adjusts them later with the new data it collected. Constructive suggestions can also be provided by predicting a short period of the future.
+
+## Question 7.2
+
+Using the 20 years of daily high temperature data for Atlanta (July through October) from Question 6.2 (file temps.txt), build and use an exponential smoothing model to help make a judgment of whether the unofficial end of summer has gotten later over the 20 years.  (Part of the point of this assignment is for you to think about how you might use exponential smoothing to answer this question. Feel free to combine it with other models if you’d like to. There’s certainly more than one reasonable approach.) 
+
+## Solution for Q7.2:
+
+## General Observation
+
+```{r  message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(kableExtra)
+library(tseries)
+library(tidyr)
+library(reshape)
+library(forecast)
+set.seed(73)
+temp<-read.delim('temps.txt',header = T)
+head(temp)
+```
+
+The temp data frame contains 123 observations (the total dates from July 1st to Oct 31) and 21 columns (1996 to 2015). The first column is the date column with the data type=’chr’. One thing we need to be careful, this data frame is not a tibble. We need to be careful when looping inside and plot with the data.
+
+```{r  message=FALSE, warning=FALSE}
+matrix1<-as.matrix(temp[,-1])
+line<-rowMeans(matrix1)
+temp[22]<-line #add total mean temp for each day
+```
+```{r, echo=FALSE}
+p_temp<-temp%>%ggplot()+geom_line(aes(x=1:123,y=temp[,2]),color='green',alpha=0.3)+
+  geom_line(aes(x=1:123,y=temp[,6]),color='blue',alpha=0.3)+
+  geom_line(aes(x=1:123,y=temp[,10]),color='brown',alpha=0.3)+
+  geom_line(aes(x=1:123,y=temp[,14]),color='red',alpha=0.3)+
+  geom_line(aes(x=1:123,y=temp[,18]),color='orange',alpha=0.3)+
+  geom_line(aes(x=1:123,y=temp[,2]),color='purple',alpha=0.3)+
+  geom_line(aes(x=1:123,y=temp[,22]),color='black',size=1)+
+  geom_vline(xintercept = 63,linetype='dashed',alpha=0.7)+
+  ggtitle("General Monthly Temperature Change from 1996 to 2015")+
+  scale_x_continuous(labels= c('July-1','July-25','August-18','September-11','October-5','October-31'))+
+  geom_text(aes(x=105,y=85,label='Avg Temperature'))+
+  xlab('Month')+
+  ylab('Temperature')
+p_temp
+```
+
+This is the plot for avg temperature change from July to Oct in 20 years.
+The black line represents the move of total daily mean temperature and the colorful ones are 1996,2000,2004,2008,2012 and 2015. From the plot, we can see the “stable” temperature period is mainly in July and August. 
+
+Now let's take a look at the change of average temperature by each year.
+
+```{r, echo=FALSE,fig.height=3}
+avg_year_temp<-colMeans(matrix1)
+df1<-data.frame(year=1996:2015,temp=avg_year_temp)
+df1%>%ggplot(aes(x=year,y=temp))+geom_line(color='dark grey')+
+  geom_point(color='red',alpha=0.6)+
+  xlab('Year')+
+  ggtitle('Avg Temperature by Year')+
+  ylab('Temperature')
+```
+
+From the plot, we can see the avg temperature was stable before 2005 but fluctuated a lot after it. Especially in 2009, the overall temperature was much cooler but the following year 2010 was very hot. With only the big temperature variation in recent years, we can’t give a conclusion as the unofficial end of summer has gotten later or the summer temperature has become warmer.
+
+My goal is to check whether unofficial summer ends later in recent years. I will use exponential smoothing to solve this problem.
+
+### Manually plot St with exponential smoothing formula
+
+Most of the time, the original data set contains lots of randomnesses, which makes the analysis and prediction work very difficult. When we plot the data, huge fluctuation without a regular pattern normally indicates the raw data might need to be cleaned and smoothed as pre-processing. An exponential smoothing algorithm can play a good role here.
+
+```{r  message=FALSE, warning=FALSE}
+rm(temp)
+temp<-read.delim('temps.txt',header = T)
+temp1<-melt(temp,variable_name = 'YEAR') #form a tibble
+df_tibble<-temp1%>%unite('date','DAY','YEAR',sep='-',remove=T)
+df_tibble$date_count<-1:nrow(df_tibble)
+#Single exponential smoothing
+s1=df_tibble[1,2] #the initial value of St
+alpha=0.3
+for (i in 2:nrow(df_tibble)){
+  s_new=alpha*df_tibble[i,2]+(1-alpha)*s1[length(s1)]
+  s1=c(s1,s_new)
+}
+df_tibble$single_smooth<-s1
+head(df_tibble,3)
+```
+```{r, echo=FALSE,fig.width=12}
+p_single<-df_tibble%>%ggplot()+geom_line(aes(x=date_count,y=value),alpha=0.3)+
+  geom_line(aes(x=date_count,y=single_smooth),color='blue',alpha=0.7)+
+  xlab('Year')+ylab('Temp')+
+  scale_x_continuous(labels=c('1996','2000','2004','2008','2012','2016'))+
+  geom_hline(linetype='dashed',yintercept =65,color='orange')+
+  geom_hline(linetype='dashed',yintercept =95,color='orange')+
+  ggtitle('Single exponential smoothing with α=0.3')
+p_single
+```
+
+I manually imply the single exponential smoothing formula with alph=0.3 and want to check how well our formula can do? How smooth it can modify the raw data? From the blue line ( baseline), we can see the fluctuation ranges from 100-55 to 95-65 which means it smooths the original data somehow. But the seasonality pattern is still there with big ups and downs.
+
+Let’s try to use the triple exponential smoothing formula with alpha=0.3, gamma=0.3. Since the trend there is very vague, for this experiment, I just ignore the trend part in the formula by only adding the seasonal component: C.
+
+```{r  message=FALSE, warning=FALSE}
+#Triple exponential smoothing
+s3_1=df_tibble[124,2] #triple exponential start from the 2nd season
+C=rep(1,123) #initial C=1 for all first season
+alpha=0.3
+gamma=0.3
+for (i in 124:nrow(df_tibble)){
+  s_new=alpha*df_tibble[i,2]/C[i-123]+(1-alpha)*s3_1[length(s3_1)]
+  s3_1=c(s3_1,s_new)
+  c_new=gamma*(df_tibble[i,2]/s_new)+(1-gamma)*C[i-123]
+  C=c(C,c_new)
+}
+df_s3_1<-data.frame(date_count=1:nrow(df_tibble),
+                    value=df_tibble$value,
+                    triple_smooth=c(rep(80,123),s3_1[-length(s3_1)]))
+head(df_s3_1,3)
+```
+
+```{r, echo=FALSE,fig.width=12}
+p_triple<-df_s3_1%>%ggplot()+geom_line(aes(x=date_count,y=triple_smooth),color='red',alpha=0.7)+
+  geom_line(aes(x=date_count,y=value),alpha=0.3)+
+  xlab('Year')+
+  ylab('Temperature')+
+  scale_x_continuous(labels=c('1996','2000','2004','2008','2012','2016'))+
+  geom_hline(linetype='dashed',yintercept =95,color='orange')+
+  geom_hline(linetype='dashed',yintercept =65,color='orange')+
+  ggtitle('Triple exponential smoothing with α=0.3,γ=0.3')
+p_triple
+```
+
+The red line here is the baseline calculated by triple exponential smoothing. It modifies the fluctuation range mainly from 100-55 to 95-65. Compare with single smoothing, there is no evidence showing the line becomes smoother. This test result is kind of surprised me since I expected to see a “much smoother” line. 
+
+Note: It is not necessarily better if the new plot is smooth, it is just less prone to random fluctuations in the data, we also wouldn't want a constant line so it's a balance. 
+
+### Holt-Winters Model
+
+Time to try the Holt-Winters model. Since it integrates an optimized process to calculate the best α,β,γ for prediction (the algorithm aims to minimize the squared one-step prediction error), the newly generated data ($\hat{x}$) is the "1-step prediction" data that shows as red color in the plot.
+
+Note: In my manual plots, the red and blue lines are baseline (St) values, however for Holt-Winters, it is the predicted value.
+
+**Some explanation for Holt-Winters model:**
+
+* The data fit in needs to be time-series class: ts()
+* alpha, beta,gamma=NULL: Triple exponential smoothing (we don't need to set them since the algorithm will find the best values itself)
+* beta=FALSE, gamma=FALSE: Single exponential smoothing
+* gamma=FALSE: Double exponential smoothing
+* seasonal: The additive method is preferred when the seasonal variations are roughly constant through the series, while the multiplicative method is preferred when the seasonal variations are changing proportionally to the level of the series.
+
+**Output:**
+
+* fitted(Triple exponential smoothing ): $\hat{x}$, level, trend, season.
+* fitted(Double exponential smoothing ): $\hat{x}$, level, trend
+* level: unmodified by trend or seasonality
+* SSE: The final sum of squared errors achieved in optimizing
+
+**Note: When plot, the predicted line start from different part, this is because the algorithm need previous data to build the predicted data $\hat{x}$:**
+
+* Single ES: fitted data start from 2nd data point
+* Double ES: fitted data start from 3rd data point
+* Triple ES: fitted data start from the 2nd season
+
+#### Take the year 1996 data as an example:
+
+There is no seasonality within just one year, so let's set gamma=FALSE.
+```{r  message=FALSE, warning=FALSE}
+temp_vector<-as.vector(unlist(temp[,-1])) 
+#erase the date column, append all in 1 vector 
+#as.vector() will take off the vector element's name
+temp_vector<-ts(temp_vector, start = 1996, frequency = 123 ) #convert to time series data
+
+test_1996<-HoltWinters(temp_vector[1:123],gamma=FALSE)
+plot(fitted(test_1996))
+```
+
+From above we can see the main direction of the prediction($\hat{x}$) is decreasing. It is reasonable since the temperature mainly decreases from July to October. The overall baseline (level) is also decreasing (reasonable too), with a little bit up at the end of October. Trend changes from -1 to -0.4, This is because the baseline has captured the majority of the decreasing, which leads the trend value decreasing.
+
+```{r  message=FALSE, warning=FALSE}
+plot(test_1996,xlab='1996(July 1st to Oct 31th)')
+```
+
+Since Holt-Winters aims to "minimizing the squared one-step prediction error", **how precise it can predict in 1 step is important. The more similar the red line shape to the black line, the better the mode's predictive ability for the original data set (with smaller SSE). How smooth it can turn the line to doesn't really matter.**  I did see the whole red line is very similar to the black line's shape, but a little bit horizontal moved to the right with less fluctuation. It indeed does a good job here!
+
+#### Use Holt-Winters model for all temperature data with single exponential smoothing (additive) 
+
+```{r  message=FALSE, warning=FALSE}
+forca<-HoltWinters(temp_vector,beta=FALSE,gamma=FALSE)
+head(fitted(forca))
+```
+
+Lets see α and SSE:
+
+```{r  message=FALSE, warning=FALSE}
+forca$alpha
+forca$SSE
+forca$coefficients
+plot(forca)
+plot(fitted(forca))
+```
+
+The level, xhat(red), and original data (black) line shapes are nearly the same which means our fitted value,the baseline are nearly the same as our observation data. The SSE is the smallest when compared with other models. The alpha is big which means the recent data plays an important role in setting the new baseline!  Without setting the trend and seasonality component, our baseline absorbs most of the main fluctuation from the real data which might stop us from detecting the real moving direction in our data.
+
+
+#### Use Holt-Winters model for all temperature data with double exponential smoothing (additive) 
+```{r  message=FALSE, warning=FALSE}
+forca<-HoltWinters(temp_vector,gamma=FALSE)
+head(fitted(forca))
+```
+
+Lets see α, β and SSE:
+```{r  message=FALSE, warning=FALSE}
+forca$alpha
+forca$beta
+forca$SSE
+forca$coefficients
+plot(forca)
+plot(fitted(forca))
+```
+
+The red and black lines are still overlapped with each other so well. The trend range is tiny, change from -1 to -0.1. As a result, the shape of the level(baseline) is also the same as xhat (fitted value) line. Without setting the seasonality component, our baseline absorbs the main fluctuation from the real data which might stop us from detecting the real moving direction in our data.
+
+
+#### Use Holt-Winters model for all temperature data with triple exponential smoothing (additive) 
+
+```{r  message=FALSE, warning=FALSE}
+forca<-HoltWinters(temp_vector)
+head(fitted(forca))
+```
+
+Lets see α, β, γ and SSE:
+```{r  message=FALSE, warning=FALSE}
+forca$alpha
+forca$beta
+forca$gamma
+forca$SSE
+forca$coefficients[1:2]
+plot(forca)
+# In the beginning, the red line's variation is huge! This is because the model has very limited data to learn, so before 2000, the prediction is quite off! The later the prediction, the more accurate it is! In addition, plot starts from 1997 since 1996 is used for training our model.
+plot(fitted(forca))
+```
+
+From the plot, we can see the trend line is a horizontal line near 0.
+The fluctuation of the seasonal component becomes bigger and bigger which means the variance of the temperature in recent years becomes bigger.
+The optimized α=0.661, β=0, γ=0.6248 with the final baseline=71.477, final trend=-0.0043.
+Since the final trend is nearly 0 together with β=0 which means when calculating the new trend, all the weight is added to the previous trend, the observation of the real data didn't impact the new value of the trend (lot's of randomness). So, for triple exponential smoothing, there is no trend with Atlanta summer temperature in 20 years.
+
+#### Use Holt-Winters Model for all temperature data with triple exponential smoothing (multiplicative) 
+
+```{r  message=FALSE, warning=FALSE}
+forca_multi<-HoltWinters(temp_vector,seasonal='mult')
+head(fitted(forca_multi))
+```
+
+Lets see α, β, γ and SSE:
+```{r  message=FALSE, warning=FALSE}
+forca_multi$alpha
+forca_multi$beta
+forca_multi$gamma
+forca_multi$SSE
+forca_multi$coefficients[1:2]
+plot(forca_multi)
+plot(fitted(forca_multi))
+```
+
+After changing the seasonal="multiplicative", the final trend is still nearly 0 with β=0.
+The fluctuation of the seasonal component also become bigger in later years.
+
+When considering which model does a better job, we can consider this principle: **the additive method is preferred when the seasonal variations are roughly constant through the series, while the multiplicative method is preferred when the seasonal variations are changing proportionally to the level of the series.** Here for our summer temperature data, the season variation is more like a group of constant numbers add or minus from the baseline rather than a group of ratios times our baseline. Generally speaking, multiplicative method is more suitable with big fluctuated data, since with a certain baseline, multiple can increase and decrease a value much faster than additive. 
+
+In addition, if a place is surrounded by water or very moist, I think additive is good (water makes temperature fluctuate less, more stable). If in dessert, multiplicative might be a better choice. As for Atlanta, it is a southern city near the sea with an annual rainfall of 51.5 in. compared to 38.1 in. as the avg rainfall in the US. So I decide to choose the additive model to further my analysis.
+
+### Forcast the next 2 years temperature
+#### Method 1. "forecast" package
+```{r  message=FALSE, warning=FALSE}
+forca_in2year<-forecast(forca,246)
+# forca_in2year$mean  (we can get the value of all predicted temperature in next 2 years)
+plot(forca_in2year)
+abline(h = 75, col = 'coral2', lwd = 2,lty=3)
+```
+
+
+* The blue line: the prediction for the next 2 years
+* Dark grey: 80% confidence level for prediction intervals
+* Light grey: 95% confidence level for prediction intervals
+
+From the plot we can see, in future, the Atlanta temperature will become cooler! If I draw a horizontal line at y=75, the interval for temperature above 75 F is actually shorter which means the summer is shorter!
+
+#### Method 2. predict()
+```{r  message=FALSE, warning=FALSE}
+k<-predict(forca,246,prediction.interval=F)
+plot(forca,k)
+abline(h = 75, col = 'blue', lwd = 2,lty=3)
+```
+
+We can tell even with different prediction methods, the result is the same: in the next 2 years, the Atlanta summer is becoming cooler and shorter.
+
+### CUMSUM analyize with season component from Holt-Winters
+
+Let's use decompose function to check our original data again. Decompose function works just like its name: decompose a time series object into the trend, seasonal, and noise with moving average. Since our original data is very noisy, which leads to a big variance. If we directly do CUMSUM with it, the result is very unstable, choosing proper C and T is also very challenging. I indeed feel it in HW3, I have tried many combinations of C and T and their results vary a lot. Let's see if we can use any component of the original data which captures the behavior of it but much cleaner with a stable CUMSUM result.
+
+```{r  message=FALSE, warning=FALSE}
+element<-decompose(temp_vector)
+plot(element)
+```
+
+From above we can see: the “observed” line is our original data, the noise (random) takes a big part of it. There is no consistent universal trend. The only consistent line with certain pattern is seasonal! It definitely gives us a hint: the seasonal component from Holt-Winters has captured the main moving pattern of the original data! 
+
+Explanation about CUMSUM parameter:
+
+* miu: calculated from July 1st to Aug 31th (stable state)
+* sd: standard deviation for temperature in July 1st to Aug 31th 
+* Instead of setting C and T with a certain number, I choose to set them based on the proportion of the corresponding year’s sd. So years don’t affect each other. The result will be more independent and reliable.
+
+**CUMSUM formula to detect an decrease:**
+
+**St=max{0,St-1+(μ-Xt-C)}, Is St>=T? **
+
+**Let's try $T=5*sd$, $C=1.5*sd$:**
+
+```{r  message=FALSE, warning=FALSE}
+length(forca$fitted[,4]) # total 2337 date = 19 years, start from 1997
+
+# form a new temperature data frame with season component
+new_temp<- data.frame(matrix(forca$fitted[,4],ncol=19))
+names(new_temp)<-seq(1997,2015,1)
+date_index<-1:123 
+df_date_count<-data.frame(Year=1997:2015,date_count=rep(0,length(1997:2015)))
+
+for(year in 1:19){
+  miu=mean(new_temp[,year][1:62]) #the mean summer temp in that year 
+  sd=sd(new_temp[,year][1:62])
+  C=1.5*sd
+  T=5*sd
+  St=c()
+  St_last=0
+  for(i in new_temp[,year]){
+    St_now=St_last+miu-i-C 
+    if(St_now>0){
+      St=c(St,St_now)
+      St_last=St_now 
+    }else{
+      St=c(St,0)
+      St_last=0
+    }
+  }
+  mask<-St>=T 
+  df_date_count[year,2]<-date_index[mask][1]
+}
+t(df_date_count)%>% kbl() %>% kable_styling(font_size = 11)
+```
+
+
+Now let's plot the summer dates from 1997 to 2015 for getting an intuitive feeling about the summer length change.
+
+```{r, echo=FALSE,fig.height=3}
+
+df_date_count%>%ggplot(aes(x=Year,y=date_count))+
+  geom_line(color='dark grey')+geom_point(color='darkorange')+
+  ggtitle('Summer Day Count with season component (C=1.5*sd,T=5*sd)')
+ 
+```
+
+From the plot, we can see the variance of the summer day count is much smaller than using the original data. The new range is from 87-93 (6 days) which means the result is much more stable! Compare to the result of my old CUMSUM fitted by the original data, with different values of C and T, the summer end dates vary from July to October. Even for the best model, the dates spread in the whole of September! This is a great improvement! The mean is 91.21 days (Sept 30th). From 2005 to 2008, the summer is shorter but it jumps back at 2009. At this point, I can see the length of the summer from 2012 to 2015 is the same as 1997-2003. There is no evidence for the summer getting longer. 
+
+Since the detected summer end date is a bit late, let's explore more combinations of C & T.
+
+**Let's try $T=4*sd$, $C=0.5*sd$:**
+
+```{r  message=FALSE, warning=FALSE,echo=FALSE}
+rm(df_date_count)
+df_date_count<-data.frame(Year=1997:2015,date_count=rep(0,length(1997:2015)))
+for(year in 1:19){
+  miu=mean(new_temp[,year][1:62]) #the mean summer temp in that year 
+  sd=sd(new_temp[,year][1:62])
+  C=0.5*sd
+  T=4*sd
+  St=c()
+  St_last=0
+  for(i in new_temp[,year]){
+    St_now=St_last+miu-i-C 
+    if(St_now>0){
+      St=c(St,St_now)
+      St_last=St_now 
+    }else{
+      St=c(St,0)
+      St_last=0
+    }
+  }
+  mask<-St>=T 
+  df_date_count[year,2]<-date_index[mask][1]
+}
+t(df_date_count)%>% kbl() %>% kable_styling(font_size = 11) 
+```
+
+```{r, echo=FALSE,fig.height=3}
+df_date_count%>%ggplot(aes(x=Year,y=date_count))+
+  geom_line(color='dark grey')+geom_point(color='darkorange')+
+  ggtitle('Summer Day Count with season component (C=0.5*sd,T=4*sd)')
+ 
+```
+
+With change $T=4*sd$, $C=0.5*sd$, the summer day counts are still stable (mainly from 40 to 45 days, only 5 days different!) but with an overall short summer. This is because I set a small T with a very smaller C, which causes the CUMSUM more sensitive with a low threshold. The mean day count is 41.84 days, which means the average summer ends on Aug 12. Here, an interesting found is: from the plot, it seems the summer in Atlanta has become a little bit longer from 2000. In order to dig deeper with my observation, let's run another combination of a bigger C.
+
+**Let's try $T=4*sd$, $C=1*sd$:**
+
+```{r  message=FALSE, warning=FALSE,echo=FALSE}
+rm(df_date_count)
+df_date_count<-data.frame(Year=1997:2015,date_count=rep(0,length(1997:2015)))
+for(year in 1:19){
+  miu=mean(new_temp[,year][1:62]) #the mean summer temp in that year 
+  sd=sd(new_temp[,year][1:62])
+  C=1*sd
+  T=4*sd
+  St=c()
+  St_last=0
+  for(i in new_temp[,year]){
+    St_now=St_last+miu-i-C 
+    if(St_now>0){
+      St=c(St,St_now)
+      St_last=St_now 
+    }else{
+      St=c(St,0)
+      St_last=0
+    }
+  }
+  mask<-St>=T 
+  df_date_count[year,2]<-date_index[mask][1]
+}
+t(df_date_count)%>% kbl() %>% kable_styling(font_size = 11) 
+```
+```{r, echo=FALSE,fig.height=3}
+df_date_count%>%ggplot(aes(x=Year,y=date_count))+
+  geom_line(color='dark grey')+geom_point(color='darkorange')+
+  ggtitle('Summer Day Count with season component (C=1*sd,T=4*sd)')
+ 
+```
+
+With $T=4*sd$, $C=1*sd$, the summer day counts are more stable (mainly from 83 to 86 days, only 3 days different!) and the mean day count is 85.52 days (Sept 25rd). It fits our intuition of the summer ending date so well with such a small variance. Furthermore, from the plot, we can see our summer has become 3 days longer since the year 2010! I like the result of this set of C and T. Before making the final judgment of whether the summer last longer in last 20 year, let's test one more set of C and T.
+
+**Let's try $T=5*sd$, $C=1*sd$:**
+
+```{r  message=FALSE, warning=FALSE,echo=FALSE}
+rm(df_date_count)
+df_date_count<-data.frame(Year=1997:2015,date_count=rep(0,length(1997:2015)))
+for(year in 1:19){
+  miu=mean(new_temp[,year][1:62]) #the mean summer temp in that year 
+  sd=sd(new_temp[,year][1:62])
+  C=1*sd
+  T=5*sd
+  St=c()
+  St_last=0
+  for(i in new_temp[,year]){
+    St_now=St_last+miu-i-C 
+    if(St_now>0){
+      St=c(St,St_now)
+      St_last=St_now 
+    }else{
+      St=c(St,0)
+      St_last=0
+    }
+  }
+  mask<-St>=T 
+  df_date_count[year,2]<-date_index[mask][1]
+}
+t(df_date_count)%>% kbl() %>% kable_styling(font_size = 11) 
+```
+
+```{r, echo=FALSE,fig.height=3}
+df_date_count%>%ggplot(aes(x=Year,y=date_count))+
+  geom_line(color='dark grey')+geom_point(color='darkorange')+
+  ggtitle('Summer Day Count with season component (C=1*sd,T=5*sd)')
+```
+
+With only changed the threshold from 4 to 5, we can't see any evidence of summer has turned longer! In 1997 and 1998, the summer was around 5 days longer than 1999 to 2010. After 2010, the length of summer gradually increased by only 1 day. 
+
+With so many observations of CUMSUM results, I think it is hard to choose which one is the best. The result is too sensitive to C and T. 
+
+**Conclusion:**
+
+When using the forecast function with Holt-Winters, it predicts that Atlanta is getting cooler in the next 2 years. Using Holt-Winters season component and CUMSUM, we still can’t tell whether the summer has become longer in the past 20 years. 
+
+My conclusion is: at this point, there is no evidence the unofficial end of summer has gotten later over the 20 years based only on this data set. The only thing we can be sure of is there is no trend. The summer temperature is not getting warmer or cooler, the variation is just caused by seasonality and randomness. For the forecast of Holt-Winters, randomness in the original data set might affect its result. The predictions for Holt-Winters will have sources of error from prediction. If we can get more data in the future, the conclusion will be easier to make. 
+
+
