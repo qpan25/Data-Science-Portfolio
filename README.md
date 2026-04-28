@@ -50,4 +50,4 @@ I specialize in bridging the gap between complex mathematical theory and actiona
 
 ## 📫 Contact Me
 * **Email:** qpan25@yahoo.com
-* **LinkedIn:** [Your LinkedIn Profile Link]
+* **LinkedIn:** [https://www.linkedin.com/in/sophie-pan-25364b66/]
